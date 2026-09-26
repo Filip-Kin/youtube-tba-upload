@@ -1,0 +1,59 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write # needed to attach the exe to a Release on tags
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./...
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            echo "v=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "v=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Pure-Go SQLite (modernc.org/sqlite) cross-compiles to Windows with no cgo,
+      # so the Windows sidecar is produced on ubuntu with no Windows runner.
+      - name: Cross-compile Windows exe
+        env:
+          CGO_ENABLED: '0'
+          GOOS: windows
+          GOARCH: amd64
+        run: go build -ldflags "-X main.Version=${{ steps.ver.outputs.v }}" -o dist/youtube-tba-upload.exe .
+
+      - name: Upload exe artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: youtube-tba-upload-windows-amd64
+          path: dist/youtube-tba-upload.exe
+          if-no-files-found: error
+
+      - name: Attach exe to Release (tags only)
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/youtube-tba-upload.exe
