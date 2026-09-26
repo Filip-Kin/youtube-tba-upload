@@ -1,0 +1,83 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"sync"
+	"time"
+
+	"github.com/Filip-Kin/youtube-tba-upload/internal/ytstudio"
+)
+
+// The channel's playlists are cached on disk so the dropdown survives restarts
+// and the upload/backfill paths can resolve a playlist_id -> title WITHOUT
+// launching Chrome every time. The channel id is cached too, so a refresh skips
+// the studio.youtube.com redirect and goes straight to the playlists page.
+type ytPlaylistCache struct {
+	ChannelID string              `json:"channel_id"`
+	Playlists []ytstudio.Playlist `json:"playlists"`
+	FetchedAt int64               `json:"fetched_at"`
+}
+
+var plCacheMu sync.Mutex
+
+func playlistCachePath() string {
+	return filepath.Join(dataRoot(), "yt-playlists.json")
+}
+
+func loadPlaylistCache() ytPlaylistCache {
+	plCacheMu.Lock()
+	defer plCacheMu.Unlock()
+	var c ytPlaylistCache
+	if data, err := os.ReadFile(playlistCachePath()); err == nil {
+		_ = json.Unmarshal(data, &c)
+	}
+	return c
+}
+
+func savePlaylistCache(c ytPlaylistCache) {
+	plCacheMu.Lock()
+	defer plCacheMu.Unlock()
+	c.FetchedAt = time.Now().Unix()
+	if data, err := json.MarshalIndent(c, "", "  "); err == nil {
+		_ = os.MkdirAll(filepath.Dir(playlistCachePath()), 0o755)
+		_ = os.WriteFile(playlistCachePath(), data, 0o644)
+	}
+}
+
+// refreshPlaylists scrapes the channel (reusing the cached channel id to skip
+// the redirect) and persists the result. Returns the fresh list.
+func refreshPlaylists(ctx context.Context, profile ytstudio.Profile) ([]ytstudio.Playlist, error) {
+	cache := loadPlaylistCache()
+	pls, channelID, err := driver.ListPlaylists(ctx, profile, cache.ChannelID)
+	if err != nil {
+		return nil, err
+	}
+	if pls == nil {
+		pls = []ytstudio.Playlist{}
+	}
+	if channelID == "" {
+		channelID = cache.ChannelID
+	}
+	savePlaylistCache(ytPlaylistCache{ChannelID: channelID, Playlists: pls})
+	return pls, nil
+}
+
+// resolvePlaylistTitle returns the current title for a stored playlist id,
+// preferring the on-disk cache (no Chrome). On a cache miss it scrapes once to
+// populate the cache, then resolves. Returns "" if it still can't be found.
+func resolvePlaylistTitle(ctx context.Context, profile ytstudio.Profile, playlistID string) string {
+	if playlistID == "" {
+		return ""
+	}
+	if title := playlistTitleByID(loadPlaylistCache().Playlists, playlistID); title != "" {
+		return title
+	}
+	pls, err := refreshPlaylists(ctx, profile)
+	if err != nil {
+		return ""
+	}
+	return playlistTitleByID(pls, playlistID)
+}

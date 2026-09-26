@@ -1,0 +1,12 @@
+# Built binaries
+/youtube-tba-upload
+/youtube-tba-upload.exe
+/bin/
+
+# SQLite databases (created at runtime beside the recordings)
+*.db
+*.db-wal
+*.db-shm
+
+# Node (only needed to regenerate tba/consts.go)
+node_modules/

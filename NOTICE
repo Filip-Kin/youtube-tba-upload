@@ -1,0 +1,17 @@
+youtube-tba-upload
+
+This project is derived from TBA-uploader by lethosor
+(https://github.com/lethosor/TBA-uploader), by way of Filip-Kin/TBA-uploader.
+
+The following originate upstream and remain under the upstream license (see the
+LICENSE file, which is carried unchanged):
+  - the autoav-helper YouTube uploader (now this module's main package),
+  - internal/ytstudio (the chromedp YouTube Studio automation), and
+  - the tba package (trusted-API request signing).
+
+Changes made here:
+  - extracted the uploader into a standalone Go module,
+  - replaced the JSON state file with a shared SQLite database (WAL) that FIM-AV
+    Assistant and this sidecar both use,
+  - added TBA match_videos/add submission after upload, plus /api/health and
+    /api/shutdown for running as a managed sidecar.
