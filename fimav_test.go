@@ -26,33 +26,40 @@ func openStoreFor(t *testing.T, dir string) *stateStore {
 // writeFimavRec simulates FIM-AV Assistant writing its recording/team columns
 // into the shared database's matches table. It touches only FIM-AV-owned
 // columns, exactly as the migrated FIM-AV match store will.
-func writeFimavRec(t *testing.T, s *stateStore, rec fimavRecord) {
+func writeFimavRec(t *testing.T, _ *stateStore, rec fimavRecord) {
 	t.Helper()
-	teamsJSON := ""
-	if rec.Teams != nil {
-		if b, err := json.Marshal(rec.Teams); err == nil {
-			teamsJSON = string(b)
+	doc, err := readTypedManifest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for i := range doc.Matches {
+		if doc.Matches[i].FileName == rec.FileName {
+			doc.Matches[i].FilePath = rec.FilePath
+			doc.Matches[i].Status = rec.Status
+			doc.Matches[i].HasCard = rec.HasCard
+			doc.Matches[i].EndedAt = rec.EndedAt
+			doc.Matches[i].Teams = rec.Teams
+			doc.Matches[i].Processing = rec.Processing
+			found = true
+			break
 		}
 	}
-	procState, procOut, procErr := "", "", ""
-	if rec.Processing != nil {
-		procState, procOut, procErr = rec.Processing.State, rec.Processing.OutputPath, rec.Processing.Error
+	if !found {
+		doc.Matches = append(doc.Matches, typedMatch{
+			ID: rec.ID, FileName: rec.FileName, FilePath: rec.FilePath,
+			Status: rec.Status, HasCard: rec.HasCard, EndedAt: rec.EndedAt,
+			Teams: rec.Teams, Processing: rec.Processing,
+		})
 	}
-	if _, err := s.db.Exec(`
-		INSERT INTO matches (file_name, file_path, record_status, has_card, ended_at,
-		                     teams_json, processing_state, processing_output, processing_error)
-		VALUES (?,?,?,?,?,?,?,?,?)
-		ON CONFLICT(file_name) DO UPDATE SET
-			file_path = excluded.file_path,
-			record_status = excluded.record_status,
-			has_card = excluded.has_card,
-			ended_at = excluded.ended_at,
-			teams_json = excluded.teams_json,
-			processing_state = excluded.processing_state,
-			processing_output = excluded.processing_output,
-			processing_error = excluded.processing_error`,
-		rec.FileName, rec.FilePath, rec.Status, boolToInt(rec.HasCard), rec.EndedAt,
-		teamsJSON, procState, procOut, procErr); err != nil {
+	if doc.Version == 0 {
+		doc.Version = 1
+	}
+	b, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFileAtomic(manifestPath(), b); err != nil {
 		t.Fatal(err)
 	}
 }

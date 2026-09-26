@@ -50,9 +50,6 @@ func isEventFolder(dir string) bool {
 	if dir == "" {
 		return false
 	}
-	if _, err := os.Stat(filepath.Join(dir, dbFileName)); err == nil {
-		return true
-	}
 	_, err := os.Stat(filepath.Join(dir, fimavManifest))
 	return err == nil
 }

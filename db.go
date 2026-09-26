@@ -1,266 +1,165 @@
 package main
 
-// SQLite-backed state store, shared with FIM-AV Assistant.
+// JSON-manifest-backed state store — the single source of truth shared with
+// FIM-AV Assistant.
 //
-// One .db file lives in the recording folder, beside the .mp4s. It is the single
-// source of truth for upload tracking (there is no state.json). FIM-AV Assistant
-// writes the recording / identity / team columns of the `matches` table; this
-// sidecar writes only the upload + operational columns. WAL mode lets the two
-// processes share the file: many readers, one writer, with a busy timeout to
-// ride out contention.
+// There is exactly one file: fimav-matches.json, in the recording folder beside
+// the .mp4s. FIM-AV Assistant owns the recording/identity/team fields of each
+// match record; this sidecar owns a single "upload" object on the same record.
+// The two processes each do a locked, atomic read-modify-write (a .lock file +
+// temp-file rename), and each only ever touches its own fields, so neither
+// clobbers the other. Reads need no lock — the atomic rename means a reader
+// always sees a complete file.
 //
-// The store keeps the same facade the rest of the code already used
-// (snapshot()/update(fn)), so the upload worker and HTTP handlers didn't change
-// when the JSON file became a database. On every update the in-memory state is
-// written back inside one transaction; on the `matches` table the sidecar's
-// INSERT bootstraps a row (with filename-derived identity) only when FIM-AV has
-// not created it yet, and the ON CONFLICT clause touches ONLY sidecar columns,
-// so FIM-AV's identity/team/recording writes are never clobbered.
+// Why JSON and not a database: FIM-AV Assistant is an Electron app, and a shared
+// SQLite would force a native module (better-sqlite3 / node-gyp) into it, which
+// breaks its build. JSON needs nothing native on either side. Config is not
+// persisted here (FIM-AV pushes it via /api/upload/config on start and on save),
+// so the manifest stays the only persisted store. Recording never depends on the
+// sidecar being up.
+//
+// The store keeps the same facade the rest of the code used (snapshot()/update),
+// so the upload worker and HTTP handlers didn't change.
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
-
-	_ "modernc.org/sqlite"
+	"time"
 )
 
-// dbFileName is the shared database, co-located with the recordings and (until
-// it is retired) the fimav-matches.json manifest.
-const dbFileName = "youtube-tba-upload.db"
+const manifestFileName = "fimav-matches.json"
 
-// dbPath returns the database path for the current recording folder.
-func dbPath() string {
-	return filepath.Join(settings.VideoDir, dbFileName)
+func manifestPath() string { return filepath.Join(settings.VideoDir, manifestFileName) }
+
+// sidecarStateFileName holds SETTINGS ONLY (config, manual ids, reauth flag) —
+// not match/upload tracking, which is the shared manifest's single source of
+// truth. FIM-AV pushes config over the API; persisting it here just means a
+// sidecar restart doesn't upload with default config before the next push.
+const sidecarStateFileName = "youtube-tba-upload.json"
+
+func sidecarStatePath() string { return filepath.Join(settings.VideoDir, sidecarStateFileName) }
+
+type sidecarState struct {
+	Config          eventConfig       `json:"config"`
+	ManualVideoIDs  map[string]string `json:"manual_video_ids,omitempty"`
+	NeedsReauth     bool              `json:"needs_reauth,omitempty"`
+	LastChannelName string            `json:"last_channel_name,omitempty"`
 }
 
-// schema is created on open if absent. Column ownership is called out so both
-// ends stay honest about who writes what.
-const schema = `
-CREATE TABLE IF NOT EXISTS matches (
-    file_name            TEXT PRIMARY KEY,
-    -- ── owned by FIM-AV Assistant (recording, identity, teams) ──
-    file_path            TEXT,
-    record_id            TEXT,
-    event                TEXT,
-    level                TEXT,
-    match_number         INTEGER,
-    play                 INTEGER,
-    tba_match_key        TEXT,
-    match_label          TEXT,
-    record_status        TEXT,      -- recording | recorded | error
-    has_card             INTEGER,   -- 0/1
-    ended_at             INTEGER,   -- epoch ms
-    teams_json           TEXT,      -- {"red":[{teamNumber,teamName,card}],"blue":[...]}
-    processing_state     TEXT,      -- unprocessed | queued | processing | done | error
-    processing_output    TEXT,
-    processing_error     TEXT,
-    -- ── owned by the sidecar (upload + operational) ──
-    upload_status        TEXT,      -- new | cutting | stable | uploading | uploaded | failed | skipped
-    yt_video_id          TEXT,
-    yt_url               TEXT,
-    tba_submitted        INTEGER,   -- 0/1
-    tba_error            TEXT,
-    title_used           TEXT,
-    uploaded_at          TEXT,
-    size                 INTEGER,
-    mtime                INTEGER,
-    stable_since         INTEGER,
-    attempts             INTEGER,
-    next_attempt         INTEGER,
-    last_error           TEXT,
-    warnings_json        TEXT,
-    hold_reason          TEXT,
-    changed_after_upload INTEGER,
-    updated_at           TEXT
-);
-CREATE TABLE IF NOT EXISTS upload_config (
-    id          INTEGER PRIMARY KEY CHECK (id = 1),
-    event_key   TEXT,
-    config_json TEXT
-);
-CREATE TABLE IF NOT EXISTS upload_manual_video_ids (
-    match_key   TEXT PRIMARY KEY,
-    yt_video_id TEXT
-);
-CREATE TABLE IF NOT EXISTS upload_kv (
-    key   TEXT PRIMARY KEY,
-    value TEXT
-);
-`
+// rawManifest preserves every match record verbatim (as raw JSON objects) so a
+// write never drops a FIM-AV-owned field we don't model.
+type rawManifest struct {
+	Version int                          `json:"version"`
+	Matches []map[string]json.RawMessage `json:"matches"`
+}
 
-// stateStore owns one recording folder's database. Writes are serialized through
-// mu (and one transaction); the *sql.DB itself is safe for the read-only helpers
-// (fimavRecord) that the scan calls without taking mu.
+// typedMatch is the subset we read: identity + teams + processing + our upload
+// object. Extra fields in the file are ignored on read (they're preserved on
+// write via rawManifest, not through this type).
+type typedMatch struct {
+	ID          string           `json:"id"`
+	FileName    string           `json:"fileName"`
+	FilePath    string           `json:"filePath"`
+	Level       string           `json:"level"`
+	MatchNumber int              `json:"matchNumber"`
+	PlayNumber  int              `json:"playNumber"`
+	EventCode   string           `json:"eventCode"`
+	EndedAt     int64            `json:"endedAt"`
+	Status      string           `json:"status"`
+	HasCard     bool             `json:"hasCard"`
+	Teams       *fimavTeams      `json:"teams,omitempty"`
+	Processing  *fimavProcessing `json:"processing,omitempty"`
+	Upload      *videoEntry      `json:"upload,omitempty"`
+}
+
+type typedManifest struct {
+	Version int          `json:"version"`
+	Matches []typedMatch `json:"matches"`
+}
+
+// stateStore owns one recording folder's manifest-backed state.
 type stateStore struct {
-	db       *sql.DB
 	eventKey string
 	mu       sync.Mutex
 	state    eventState
+
+	// cache of the parsed manifest for read-only helpers (fimavRecord/present),
+	// keyed on the file's size+mtime so the 5s scan loop isn't re-parsing.
+	cacheMu   sync.Mutex
+	cacheSize int64
+	cacheMod  int64
+	cache     map[string]typedMatch
+	cacheHad  bool
 }
 
-// openStateStore opens (creating if needed) the database for the current
-// recording folder and loads the sidecar's state into memory.
+// openStateStore builds an in-memory state seeded with default config (FIM-AV
+// pushes the real config) and loads any upload state already in the manifest.
 func openStateStore(eventKey string) (*stateStore, error) {
 	if settings.VideoDir == "" {
 		return nil, fmt.Errorf("no recording folder set; pass -video-dir")
 	}
-	dsn := "file:" + dbPath() +
-		"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)"
-	db, err := sql.Open("sqlite", dsn)
-	if err != nil {
-		return nil, err
-	}
-	// Serialize in-process access to one connection; cross-process concurrency
-	// with FIM-AV is handled by WAL + busy_timeout.
-	db.SetMaxOpenConns(1)
-	if _, err := db.Exec(schema); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("create schema: %w", err)
-	}
 	s := &stateStore{
-		db:       db,
 		eventKey: eventKey,
 		state: eventState{
+			Config: eventConfig{
+				EventKey:            eventKey,
+				ProfileName:         defaultProfileName,
+				Visibility:          defaultVisibility,
+				TitleTemplate:       defaultTitleTemplate,
+				DescriptionTemplate: defaultDescriptionTemplate,
+				AutoSubmitTBA:       true,
+				Headless:            true,
+			},
 			Videos:         map[string]*videoEntry{},
 			ManualVideoIDs: map[string]string{},
 		},
 	}
 	if err := s.load(); err != nil {
-		_ = db.Close()
 		return nil, err
 	}
 	return s, nil
 }
 
-// load reads the sidecar's state from the database into memory. A fresh database
-// gets a default config row.
+// load reads the sidecar's upload state out of the manifest's "upload" objects.
 func (s *stateStore) load() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	// Config.
-	var cfgJSON string
-	err := s.db.QueryRow(`SELECT config_json FROM upload_config WHERE id = 1`).Scan(&cfgJSON)
-	switch {
-	case err == sql.ErrNoRows:
-		s.state.Config = eventConfig{
-			EventKey:            s.eventKey,
-			ProfileName:         defaultProfileName,
-			Visibility:          defaultVisibility,
-			TitleTemplate:       defaultTitleTemplate,
-			DescriptionTemplate: defaultDescriptionTemplate,
-			AutoSubmitTBA:       true,
-			Headless:            true,
-		}
-	case err != nil:
-		return fmt.Errorf("load config: %w", err)
-	default:
-		if e := json.Unmarshal([]byte(cfgJSON), &s.state.Config); e != nil {
-			return fmt.Errorf("parse config: %w", e)
-		}
-		if s.state.Config.EventKey == "" {
-			s.state.Config.EventKey = s.eventKey
-		}
-	}
-
-	// Videos (sidecar + operational columns; identity reconstructed into Meta).
-	rows, err := s.db.Query(`
-		SELECT file_name, level, match_number, play, tba_match_key, match_label,
-		       upload_status, yt_video_id, title_used, uploaded_at, tba_submitted, tba_error,
-		       size, mtime, stable_since, attempts, next_attempt, last_error,
-		       warnings_json, hold_reason, changed_after_upload
-		FROM matches`)
+	doc, err := readTypedManifest()
 	if err != nil {
-		return fmt.Errorf("load matches: %w", err)
+		return err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var (
-			name                                            string
-			level, key, label, status, ytID, titleUsed      sql.NullString
-			uploadedAt, lastErr, warningsJSON, holdReason   sql.NullString
-			tbaErr                                          sql.NullString
-			matchNum, play                                  sql.NullInt64
-			size, mtime, stableSince, attempts, nextAttempt sql.NullInt64
-			tbaSubmitted, changedAfterUpload                sql.NullInt64
-		)
-		if err := rows.Scan(&name, &level, &matchNum, &play, &key, &label,
-			&status, &ytID, &titleUsed, &uploadedAt, &tbaSubmitted, &tbaErr,
-			&size, &mtime, &stableSince, &attempts, &nextAttempt, &lastErr,
-			&warningsJSON, &holdReason, &changedAfterUpload); err != nil {
-			return fmt.Errorf("scan match: %w", err)
+	for _, m := range doc.Matches {
+		if m.FileName == "" || m.Upload == nil {
+			continue
 		}
-		e := &videoEntry{
-			Size:               size.Int64,
-			Mtime:              mtime.Int64,
-			Status:             status.String,
-			StableSince:        stableSince.Int64,
-			YTVideoID:          ytID.String,
-			TitleUsed:          titleUsed.String,
-			UploadedAt:         uploadedAt.String,
-			Attempts:           int(attempts.Int64),
-			NextAttempt:        nextAttempt.Int64,
-			LastError:          lastErr.String,
-			HoldReason:         holdReason.String,
-			ChangedAfterUpload: changedAfterUpload.Int64 == 1,
-			TBASubmitted:       tbaSubmitted.Int64 == 1,
-			TBASubmitError:     tbaErr.String,
-		}
-		if warningsJSON.String != "" {
-			_ = json.Unmarshal([]byte(warningsJSON.String), &e.Warnings)
-		}
-		if key.String != "" || level.String != "" {
-			e.Meta = &videoMeta{
-				TBAMatchKey: key.String,
-				MatchLevel:  level.String,
-				MatchNumber: int(matchNum.Int64),
-				MatchLabel:  label.String,
-				Play:        int(play.Int64),
+		e := *m.Upload // copy; Meta is recomputed on scan (fillMetaFromFilename)
+		e.Meta = nil
+		s.state.Videos[m.FileName] = &e
+	}
+	// Settings (config/kv/manual ids) from the sidecar-private file, if present.
+	if data, err := os.ReadFile(sidecarStatePath()); err == nil && len(data) > 0 {
+		var ss sidecarState
+		if json.Unmarshal(data, &ss) == nil {
+			if ss.Config.ProfileName != "" || ss.Config.EventKey != "" {
+				s.state.Config = ss.Config
+				if s.state.Config.EventKey == "" {
+					s.state.Config.EventKey = s.eventKey
+				}
 			}
+			if ss.ManualVideoIDs != nil {
+				s.state.ManualVideoIDs = ss.ManualVideoIDs
+			}
+			s.state.NeedsReauth = ss.NeedsReauth
+			s.state.LastChannelName = ss.LastChannelName
 		}
-		s.state.Videos[name] = e
 	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-
-	// Manual video ids.
-	mrows, err := s.db.Query(`SELECT match_key, yt_video_id FROM upload_manual_video_ids`)
-	if err != nil {
-		return fmt.Errorf("load manual ids: %w", err)
-	}
-	defer mrows.Close()
-	for mrows.Next() {
-		var k, v string
-		if err := mrows.Scan(&k, &v); err != nil {
-			return err
-		}
-		s.state.ManualVideoIDs[k] = v
-	}
-	if err := mrows.Err(); err != nil {
-		return err
-	}
-
-	// Sidecar kv.
-	s.state.NeedsReauth = s.kv("needs_reauth") == "1"
-	s.state.LastChannelName = s.kv("last_channel_name")
 	return nil
 }
 
-// kv reads a value from upload_kv (caller holds mu or is single-threaded on open).
-func (s *stateStore) kv(key string) string {
-	var v string
-	if err := s.db.QueryRow(`SELECT value FROM upload_kv WHERE key = ?`, key).Scan(&v); err != nil {
-		return ""
-	}
-	return v
-}
-
-// snapshot returns a deep copy of the in-memory state, isolated from concurrent
-// mutation (same JSON round-trip the JSON store used).
+// snapshot returns a deep copy of the in-memory state.
 func (s *stateStore) snapshot() eventState {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -270,8 +169,9 @@ func (s *stateStore) snapshot() eventState {
 	return out
 }
 
-// update applies a mutation to the in-memory state and persists it to the
-// database in a single transaction.
+// update mutates the in-memory state and writes the upload fields back to the
+// manifest. Config/kv are in-memory only, so a mutation that only touches those
+// still persists cheaply (no upload change => same file content on rename).
 func (s *stateStore) update(fn func(*eventState)) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -279,180 +179,233 @@ func (s *stateStore) update(fn func(*eventState)) error {
 	return s.persistLocked()
 }
 
-// persistLocked writes the whole in-memory state back. Caller holds mu.
+// persistLocked writes each known video's upload object into its manifest record
+// under a cross-process lock, preserving every FIM-AV-owned field. Caller holds
+// s.mu (the in-process lock); the .lock file guards against FIM-AV writing at
+// the same instant.
 func (s *stateStore) persistLocked() error {
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
+	// Settings -> the sidecar-private file (atomic; no shared lock needed, only
+	// this process writes it).
+	ss := sidecarState{
+		Config:          s.state.Config,
+		ManualVideoIDs:  s.state.ManualVideoIDs,
+		NeedsReauth:     s.state.NeedsReauth,
+		LastChannelName: s.state.LastChannelName,
 	}
-	defer func() { _ = tx.Rollback() }()
-
-	cfgJSON, err := json.Marshal(s.state.Config)
-	if err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`
-		INSERT INTO upload_config (id, event_key, config_json) VALUES (1, ?, ?)
-		ON CONFLICT(id) DO UPDATE SET event_key = excluded.event_key, config_json = excluded.config_json`,
-		s.state.Config.EventKey, string(cfgJSON)); err != nil {
-		return fmt.Errorf("save config: %w", err)
+	if b, err := json.MarshalIndent(ss, "", "  "); err == nil {
+		_ = writeFileAtomic(sidecarStatePath(), b)
 	}
 
-	now := nowRFC3339()
-	for name, e := range s.state.Videos {
-		var (
-			level, key, label string
-			matchNum, play    int
-		)
-		if e.Meta != nil {
-			level = e.Meta.MatchLevel
-			key = e.Meta.TBAMatchKey
-			label = e.Meta.MatchLabel
-			matchNum = e.Meta.MatchNumber
-			play = e.Meta.Play
-		}
-		ytURL := ""
-		if e.YTVideoID != "" {
-			ytURL = "https://www.youtube.com/watch?v=" + e.YTVideoID
-		}
-		warningsJSON := ""
-		if len(e.Warnings) > 0 {
-			if b, err := json.Marshal(e.Warnings); err == nil {
-				warningsJSON = string(b)
-			}
-		}
-		// INSERT bootstraps identity from the sidecar's Meta only when FIM-AV has
-		// not created the row; ON CONFLICT updates ONLY sidecar-owned columns.
-		if _, err := tx.Exec(`
-			INSERT INTO matches (
-				file_name, event, level, match_number, play, tba_match_key, match_label,
-				upload_status, yt_video_id, yt_url, tba_submitted, tba_error, title_used, uploaded_at,
-				size, mtime, stable_since, attempts, next_attempt, last_error, warnings_json,
-				hold_reason, changed_after_upload, updated_at
-			) VALUES (?,?,?,?,?,?,?, ?,?,?,?,?,?,?, ?,?,?,?,?,?,?, ?,?,?)
-			ON CONFLICT(file_name) DO UPDATE SET
-				upload_status = excluded.upload_status,
-				yt_video_id = excluded.yt_video_id,
-				yt_url = excluded.yt_url,
-				tba_submitted = excluded.tba_submitted,
-				tba_error = excluded.tba_error,
-				title_used = excluded.title_used,
-				uploaded_at = excluded.uploaded_at,
-				size = excluded.size,
-				mtime = excluded.mtime,
-				stable_since = excluded.stable_since,
-				attempts = excluded.attempts,
-				next_attempt = excluded.next_attempt,
-				last_error = excluded.last_error,
-				warnings_json = excluded.warnings_json,
-				hold_reason = excluded.hold_reason,
-				changed_after_upload = excluded.changed_after_upload,
-				updated_at = excluded.updated_at`,
-			name, s.state.Config.EventKey, level, matchNum, play, key, label,
-			e.Status, e.YTVideoID, ytURL, boolToInt(e.TBASubmitted), e.TBASubmitError, e.TitleUsed, e.UploadedAt,
-			e.Size, e.Mtime, e.StableSince, e.Attempts, e.NextAttempt, e.LastError, warningsJSON,
-			e.HoldReason, boolToInt(e.ChangedAfterUpload), now); err != nil {
-			return fmt.Errorf("save match %s: %w", name, err)
-		}
-	}
-
-	// Manual ids (sidecar-owned): replace wholesale.
-	if _, err := tx.Exec(`DELETE FROM upload_manual_video_ids`); err != nil {
-		return err
-	}
-	for k, v := range s.state.ManualVideoIDs {
-		if _, err := tx.Exec(`INSERT INTO upload_manual_video_ids (match_key, yt_video_id) VALUES (?, ?)`, k, v); err != nil {
-			return err
-		}
-	}
-
-	// kv.
-	if err := setKVTx(tx, "needs_reauth", boolToStr(s.state.NeedsReauth)); err != nil {
-		return err
-	}
-	if err := setKVTx(tx, "last_channel_name", s.state.LastChannelName); err != nil {
-		return err
-	}
-
-	return tx.Commit()
-}
-
-func setKVTx(tx *sql.Tx, key, value string) error {
-	_, err := tx.Exec(`
-		INSERT INTO upload_kv (key, value) VALUES (?, ?)
-		ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value)
-	return err
-}
-
-// fimavRecord reads the FIM-AV-owned columns for one file. It does NOT take mu
-// (it only reads the database), so the scan can call it from inside an update
-// closure without deadlocking. ok is false when no row exists yet.
-func (s *stateStore) fimavRecord(filename string) (fimavRecord, bool) {
-	var (
-		filePath, status, teamsJSON      sql.NullString
-		procState, procOutput, procError sql.NullString
-		hasCard, endedAt                 sql.NullInt64
-	)
-	err := s.db.QueryRow(`
-		SELECT file_path, record_status, has_card, ended_at, teams_json,
-		       processing_state, processing_output, processing_error
-		FROM matches WHERE file_name = ?`, filename).Scan(
-		&filePath, &status, &hasCard, &endedAt, &teamsJSON,
-		&procState, &procOutput, &procError)
-	if err != nil {
-		return fimavRecord{}, false
-	}
-	rec := fimavRecord{
-		FileName: filename,
-		FilePath: filePath.String,
-		Status:   status.String,
-		HasCard:  hasCard.Int64 == 1,
-		EndedAt:  endedAt.Int64,
-	}
-	if teamsJSON.String != "" {
-		var t fimavTeams
-		if json.Unmarshal([]byte(teamsJSON.String), &t) == nil {
-			rec.Teams = &t
-		}
-	}
-	if procState.String != "" || procOutput.String != "" || procError.String != "" {
-		rec.Processing = &fimavProcessing{
-			State:      procState.String,
-			OutputPath: procOutput.String,
-			Error:      procError.String,
-		}
-	}
-	return rec, true
-}
-
-// fimavPresent reports whether FIM-AV Assistant is managing this folder's
-// database — i.e. any row carries recording data. Until it does, the cut-hold
-// gate stays off, exactly as it did when no manifest existed.
-func (s *stateStore) fimavPresent() bool {
-	var n int
-	err := s.db.QueryRow(`
-		SELECT COUNT(*) FROM matches
-		WHERE record_status IS NOT NULL OR processing_state IS NOT NULL OR teams_json IS NOT NULL`).Scan(&n)
-	return err == nil && n > 0
-}
-
-func (s *stateStore) close() error {
-	if s.db == nil {
+	if len(s.state.Videos) == 0 {
 		return nil
 	}
-	return s.db.Close()
+	release, err := acquireManifestLock()
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	raw, err := readRawManifest()
+	if err != nil {
+		return err
+	}
+	if raw.Version == 0 {
+		raw.Version = 1
+	}
+
+	// Index existing records by fileName.
+	idx := map[string]int{}
+	for i, rec := range raw.Matches {
+		if fn := rawString(rec, "fileName"); fn != "" {
+			idx[fn] = i
+		}
+	}
+
+	for name, e := range s.state.Videos {
+		cp := *e
+		cp.Meta = nil
+		ub, err := json.Marshal(&cp)
+		if err != nil {
+			return fmt.Errorf("marshal upload %s: %w", name, err)
+		}
+		if i, ok := idx[name]; ok {
+			raw.Matches[i]["upload"] = json.RawMessage(ub)
+			continue
+		}
+		// No FIM-AV record yet (e.g. a hand-placed file). Add a minimal record
+		// carrying our identity so the file is tracked; FIM-AV fills the rest if
+		// it ever records it.
+		rec := map[string]json.RawMessage{
+			"fileName": jsonRaw(name),
+			"upload":   json.RawMessage(ub),
+		}
+		if e.Meta != nil {
+			rec["level"] = jsonRaw(e.Meta.MatchLevel)
+			rec["matchNumber"] = jsonRaw(e.Meta.MatchNumber)
+			rec["playNumber"] = jsonRaw(e.Meta.Play)
+		}
+		raw.Matches = append(raw.Matches, rec)
+		idx[name] = len(raw.Matches) - 1
+	}
+
+	out, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		return err
+	}
+	return writeFileAtomic(manifestPath(), out)
 }
 
-func boolToInt(b bool) int {
-	if b {
-		return 1
+// fimavRecord returns the FIM-AV-owned fields for one file, from the manifest
+// (cached by size+mtime). ok is false when there is no record yet.
+func (s *stateStore) fimavRecord(filename string) (fimavRecord, bool) {
+	byName, _ := s.manifestCache()
+	m, ok := byName[filename]
+	if !ok {
+		return fimavRecord{}, false
 	}
-	return 0
+	return fimavRecord{
+		ID:         m.ID,
+		FileName:   m.FileName,
+		FilePath:   m.FilePath,
+		EndedAt:    m.EndedAt,
+		Status:     m.Status,
+		HasCard:    m.HasCard,
+		Teams:      m.Teams,
+		Processing: m.Processing,
+	}, true
 }
 
-func boolToStr(b bool) string {
-	if b {
-		return "1"
+// fimavPresent reports whether FIM-AV is managing this folder — i.e. any record
+// carries recording data (status/teams/processing). Until it does, the cut-hold
+// gate stays off.
+func (s *stateStore) fimavPresent() bool {
+	byName, present := s.manifestCache()
+	if !present {
+		return false
 	}
-	return "0"
+	for _, m := range byName {
+		if m.Status != "" || m.Teams != nil || m.Processing != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// manifestCache returns the manifest records by fileName, reparsing only when the
+// file's size+mtime changed. The second return is whether the file exists.
+func (s *stateStore) manifestCache() (map[string]typedMatch, bool) {
+	s.cacheMu.Lock()
+	defer s.cacheMu.Unlock()
+	info, err := os.Stat(manifestPath())
+	if err != nil {
+		s.cache = nil
+		s.cacheHad = false
+		return map[string]typedMatch{}, false
+	}
+	sz, mt := info.Size(), info.ModTime().UnixNano()
+	if s.cache != nil && s.cacheSize == sz && s.cacheMod == mt {
+		return s.cache, s.cacheHad
+	}
+	doc, err := readTypedManifest()
+	byName := map[string]typedMatch{}
+	if err == nil {
+		for _, m := range doc.Matches {
+			if m.FileName != "" {
+				byName[m.FileName] = m
+			}
+		}
+	}
+	s.cache = byName
+	s.cacheSize, s.cacheMod, s.cacheHad = sz, mt, true
+	return byName, true
+}
+
+func (s *stateStore) close() error { return nil }
+
+// ── manifest I/O ─────────────────────────────────────────────────────────────
+
+func readTypedManifest() (typedManifest, error) {
+	var doc typedManifest
+	data, err := os.ReadFile(manifestPath())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return typedManifest{Version: 1}, nil
+		}
+		return doc, fmt.Errorf("read manifest: %w", err)
+	}
+	if len(data) == 0 {
+		return typedManifest{Version: 1}, nil
+	}
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return doc, fmt.Errorf("parse manifest: %w", err)
+	}
+	return doc, nil
+}
+
+func readRawManifest() (rawManifest, error) {
+	var raw rawManifest
+	data, err := os.ReadFile(manifestPath())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return rawManifest{Version: 1}, nil
+		}
+		return raw, fmt.Errorf("read manifest: %w", err)
+	}
+	if len(data) == 0 {
+		return rawManifest{Version: 1}, nil
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return raw, fmt.Errorf("parse manifest: %w", err)
+	}
+	return raw, nil
+}
+
+func rawString(rec map[string]json.RawMessage, key string) string {
+	if v, ok := rec[key]; ok {
+		var s string
+		if json.Unmarshal(v, &s) == nil {
+			return s
+		}
+	}
+	return ""
+}
+
+func jsonRaw(v any) json.RawMessage {
+	b, _ := json.Marshal(v)
+	return json.RawMessage(b)
+}
+
+func writeFileAtomic(path string, data []byte) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+// acquireManifestLock takes a cross-process advisory lock via an exclusive
+// .lock file. FIM-AV Assistant uses the same lock file + protocol. A lock older
+// than the stale timeout is stolen, so a crashed holder can't wedge writes.
+func acquireManifestLock() (func(), error) {
+	lock := manifestPath() + ".lock"
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		f, err := os.OpenFile(lock, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		if err == nil {
+			_ = f.Close()
+			return func() { _ = os.Remove(lock) }, nil
+		}
+		if info, e := os.Stat(lock); e == nil && time.Since(info.ModTime()) > 10*time.Second {
+			_ = os.Remove(lock) // steal a stale lock
+			continue
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("manifest lock busy")
+		}
+		time.Sleep(40 * time.Millisecond)
+	}
 }

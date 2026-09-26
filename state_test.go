@@ -46,9 +46,9 @@ func TestStateStoreRoundtrip(t *testing.T) {
 		t.Errorf("manual ids not persisted: %+v", got.ManualVideoIDs)
 	}
 
-	// The database should exist beside the recordings.
-	if _, err := os.Stat(filepath.Join(videoDir, dbFileName)); err != nil {
-		t.Errorf("database missing: %v", err)
+	// The shared manifest should exist beside the recordings.
+	if _, err := os.Stat(filepath.Join(videoDir, manifestFileName)); err != nil {
+		t.Errorf("manifest missing: %v", err)
 	}
 }
 
