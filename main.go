@@ -91,13 +91,18 @@ func main() {
 
 	// Fetch the browser now rather than in the middle of the first match, so
 	// the first upload of the day isn't waiting on a download.
-	if d.Managed != nil {
-		go func() {
+	go func() {
+		if d.Managed != nil {
 			if _, err := d.Managed.Ensure(context.Background()); err != nil {
 				log.Printf("browser not ready: %v", err)
+				return
 			}
-		}()
-	}
+		}
+		// Confirm the sign-in and cache the channel id/playlists up front, so the
+		// tab can show "signed in as X" (or prompt a sign-in) without waiting for
+		// the first upload to reveal an expired session.
+		verifyChannelOnBoot()
+	}()
 
 	lock := sync.Mutex{}
 	mux := http.NewServeMux()
@@ -157,6 +162,10 @@ func main() {
 	handle(http.MethodGet, "/api/upload/profiles", apiUploadListProfiles)
 	handle(http.MethodGet, "/api/upload/browser", apiUploadBrowser)
 	handle(http.MethodPost, "/api/upload/profile/login", apiUploadProfileLogin)
+	// /api/upload/login is the tab-facing alias for the sign-in flow (opens a
+	// headed browser for the operator to log into YouTube).
+	handle(http.MethodPost, "/api/upload/login", apiUploadProfileLogin)
+	handle(http.MethodPost, "/api/upload/logout", apiUploadLogout)
 	handle(http.MethodGet, "/api/upload/profile/check", apiUploadProfileCheck)
 	// POST sets, DELETE clears.
 	handle("", "/api/videos/manual", func(w http.ResponseWriter, r *http.Request) {
@@ -178,11 +187,15 @@ func main() {
 	// as a sidecar: it polls /api/health to know the process is up and serving
 	// before it shows the Upload tab, and logs the version it launched.
 	handle(http.MethodGet, "/api/health", func(w http.ResponseWriter, r *http.Request) {
+		si := getSignIn()
 		writeJSON(w, map[string]any{
-			"status":    "ok",
-			"version":   Version,
-			"video_dir": settings.VideoDir,
-			"watching":  isEventFolder(settings.VideoDir),
+			"status":       "ok",
+			"version":      Version,
+			"video_dir":    settings.VideoDir,
+			"watching":     isEventFolder(settings.VideoDir),
+			"signed_in":    si.SignedIn,
+			"channel_name": si.ChannelName,
+			"sign_in":      si,
 		})
 	})
 	// Graceful stop for the host app to call before it quits, so the browser is
@@ -674,6 +687,7 @@ func browserProfile(cfg eventConfig) ytstudio.Profile {
 		Directory:   cfg.BrowserProfileDirectory,
 		DebugPort:   cfg.BrowserDebugPort,
 		Exe:         cfg.BrowserExe,
+		Headless:    cfg.Headless,
 	}
 }
 
@@ -780,9 +794,11 @@ func apiUploadProfileCheck(w http.ResponseWriter, r *http.Request) {
 	profile := profileForRequest(r.URL.Query().Get("event_key"), r.URL.Query().Get("profile_name"))
 	name, err := driver.CheckChannel(r.Context(), profile)
 	if err != nil {
+		setSignIn(signInState{SignedIn: false, Error: err.Error()})
 		writeJSON(w, map[string]any{"error": err.Error()})
 		return
 	}
+	setSignIn(signInState{SignedIn: true, ChannelName: name})
 	writeJSON(w, map[string]string{"channel_name": name})
 }
 

@@ -34,6 +34,11 @@ type Profile struct {
 	Directory   string
 	DebugPort   int
 	Exe         string
+	// Headless runs a tool-owned profile's browser hidden. It is a preference:
+	// tab() opens headless first and falls back to a headed window if headless
+	// won't start. Ignored for a live profile, which is always headed. Sign-in
+	// forces headed regardless.
+	Headless bool
 }
 
 // Live reports whether this profile points at an installed browser's own

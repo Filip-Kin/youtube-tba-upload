@@ -110,8 +110,16 @@ Base `http://localhost:8807`. Permissive CORS; event-scoped routes take
 **Config** — `GET /api/upload/config?event_key=E` → the config object (§4).
 `POST` the same object to save (empty templates default; save triggers a rescan).
 This is where the tab writes `tba_auth_id`, `tba_secret`, `auto_submit_tba`,
-`playlist_id`+`playlist_name`, templates, visibility, include flags, browser
-profile fields.
+`playlist_id`+`playlist_name`, templates, visibility, `headless`,
+`thumbnail_path`, and browser profile fields. The template defaults the UI shows
+MUST equal the sidecar defaults in `template.go` (`defaultTitleTemplate`,
+`defaultDescriptionTemplate`) — supported placeholders are `{video_prefix}`,
+`{event_name}`, `{event_year}`, `{match_level}`, `{match_number}`,
+`{match_label}`, `{play}`, `{play_suffix}`, `{title}`, and
+`{red[i].number}`/`{red[i].name}` / `{blue[i].number}`/`{blue[i].name}`.
+
+Practice and test matches are **never uploaded** — the sidecar hard-excludes
+those levels (`includeLevel`), so there are no include-practice/test flags.
 
 **State** — `GET /api/upload/state?event_key=E` → `{config, videos, manual_video_ids,
 needs_reauth, last_channel_name}`. `videos` is keyed by filename with the fields
@@ -125,7 +133,21 @@ in §4. Poll ~5 s to render the table.
 (cached; scrape on refresh). Store `playlist_id`; title is display + fallback.
 
 **Profiles / sign-in** — `GET /api/upload/profiles`, `GET /api/upload/browser`,
-`POST /api/upload/profile/login`, `GET /api/upload/profile/check`.
+`GET /api/upload/profile/check?event_key=E` (→ `{channel_name}` or `{error}`;
+also updates the global sign-in status).
+- `POST /api/upload/login` (alias of `/api/upload/profile/login`) — opens a
+  **headed** browser for the operator to sign in to YouTube. Always headed,
+  regardless of the headless setting. Returns immediately; the operator closes
+  the window to finish. Body `{event_key, profile_name?}`.
+- `POST /api/upload/logout` — closes any open browser and **deletes the managed
+  profile directory** so the next sign-in starts fresh. Refuses a live
+  (operator-owned) browser profile. Body `{event_key, profile_name?}`.
+
+**Sign-in status** — surfaced in `GET /api/health` as `signed_in`,
+`channel_name`, and a `sign_in` object `{signed_in, channel_name, error,
+checked_at}`. Resolved on boot (headless channel check with the tool profile,
+which also caches the channel id + playlists) and refreshed after
+login/logout/check. The tab shows "signed in as X" or a sign-in prompt from this.
 
 **Manual video ids** — `POST /api/videos/manual?event_key=E`
 `{match_key, yt_video_id}` (empty id deletes); `DELETE ...&match_key=K`.
@@ -191,9 +213,9 @@ Follow FIM-AV Assistant's existing idioms (verified against branch
   "profile_name": "youtube",
   "playlist_id": "PLEliS6gfgle4", "playlist_name": "...",
   "title_template": "...", "description_template": "...",
-  "thumbnail_path": "...",
+  "thumbnail_path": "...",               // local image path; ytstudio sets it as the thumbnail
   "visibility": "UNLISTED",              // PUBLIC | UNLISTED | PRIVATE
-  "include_practice": false, "include_test": false,
+  "headless": true,                      // run the upload browser hidden (default); sign-in is always headed
   "browser_user_data_dir": "", "browser_profile_directory": "",
   "browser_debug_port": 0, "browser_exe": "",
   "cut_wait_seconds": 0,                 // 0=default 120s; <0=don't wait for cut

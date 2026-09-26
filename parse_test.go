@@ -112,22 +112,28 @@ func TestOrderKey(t *testing.T) {
 }
 
 func TestIncludeLevel(t *testing.T) {
-	cfg := eventConfig{IncludePractice: false, IncludeTest: false}
-	p, _ := parseFilename("2026 X Qualification Match 5.mp4")
-	if !p.includeLevel(cfg) {
-		t.Fatal("qual should always be included")
+	included := []string{
+		"2026 X Qualification Match 5.mp4",
+		"2026 X Playoff Match 3.mp4",
+		"2026 X Final Match 1.mp4",
 	}
-	prac, _ := parseFilename("2026 X Practice Match 5.mp4")
-	if prac.includeLevel(cfg) {
-		t.Fatal("practice should be excluded when IncludePractice=false")
+	for _, name := range included {
+		p, _ := parseFilename(name)
+		if !p.includeLevel() {
+			t.Errorf("%q should be uploaded", name)
+		}
 	}
-	cfg.IncludePractice = true
-	if !prac.includeLevel(cfg) {
-		t.Fatal("practice should be included when IncludePractice=true")
+	// Practice, test and manual are hard-excluded — never uploaded.
+	excluded := []string{
+		"2026 X Practice Match 5.mp4",
+		"zz_PR1_MIKET.mp4",
+		"zz_TM1_MIKET.mp4",
+		"2026 X Manual Match 1.mp4",
 	}
-	man, _ := parseFilename("2026 X Manual Match 1.mp4")
-	if man.includeLevel(cfg) {
-		t.Fatal("manual recordings should always be excluded")
+	for _, name := range excluded {
+		if p, ok := parseFilename(name); ok && p.includeLevel() {
+			t.Errorf("%q must never be uploaded", name)
+		}
 	}
 }
 

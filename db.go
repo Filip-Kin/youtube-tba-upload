@@ -153,6 +153,7 @@ func (s *stateStore) load() error {
 			TitleTemplate:       defaultTitleTemplate,
 			DescriptionTemplate: defaultDescriptionTemplate,
 			AutoSubmitTBA:       true,
+			Headless:            true,
 		}
 	case err != nil:
 		return fmt.Errorf("load config: %w", err)

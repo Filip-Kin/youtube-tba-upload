@@ -446,7 +446,7 @@ func (m *uploadManager) pickNext() (pendingUpload, bool) {
 		if !ok {
 			continue
 		}
-		if !p.includeLevel(st.Config) {
+		if !p.includeLevel() {
 			continue
 		}
 		// Skip files belonging to other events. We match by VideoPrefix

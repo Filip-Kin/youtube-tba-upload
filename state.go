@@ -37,9 +37,10 @@ type eventConfig struct {
 	DescriptionTemplate string `json:"description_template"`
 	ThumbnailPath       string `json:"thumbnail_path"`
 	// Visibility is PUBLIC, UNLISTED or PRIVATE. Empty means unlisted.
-	Visibility      string `json:"visibility,omitempty"`
-	IncludePractice bool   `json:"include_practice"`
-	IncludeTest     bool   `json:"include_test"`
+	Visibility string `json:"visibility,omitempty"`
+	// Headless runs the upload browser hidden (default). Turned off, uploads run
+	// in a visible window. Sign-in is always headed regardless of this.
+	Headless bool `json:"headless"`
 	// Browser* point the driver at an installed browser's own profile instead
 	// of a profile this tool owns, so there is no second YouTube sign-in.
 	// BrowserUserDataDir is the browser's "User Data" folder,

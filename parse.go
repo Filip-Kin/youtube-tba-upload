@@ -143,17 +143,14 @@ func (p parsedFilename) playSuffix() string {
 	return " Play " + strconv.Itoa(p.Play)
 }
 
-// includeLevel decides whether this filename's level passes the include_* config.
-// Manual recordings are always skipped — they're ad-hoc recordings made
-// outside the regular match flow and shouldn't be auto-uploaded.
-func (p parsedFilename) includeLevel(cfg eventConfig) bool {
+// includeLevel decides whether this filename's level is ever uploaded. Only
+// real competition matches are: qualification, playoff and final. Practice and
+// test matches never go to YouTube or TBA, and manual recordings are ad-hoc, so
+// all three are hard-excluded here — there is no config flag that turns them on.
+func (p parsedFilename) includeLevel() bool {
 	switch strings.ToLower(p.Level) {
 	case "qualification", "playoff", "final":
 		return true
-	case "practice":
-		return cfg.IncludePractice
-	case "test":
-		return cfg.IncludeTest
 	}
 	return false
 }

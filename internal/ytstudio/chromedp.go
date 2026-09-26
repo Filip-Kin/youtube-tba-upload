@@ -257,7 +257,13 @@ func profileKey(p Profile) string {
 	if p.Live() {
 		return "live:" + p.UserDataDir + ":" + p.Directory
 	}
-	return "profile:" + p.Name
+	// Headedness is part of the key: Chrome won't share one profile between a
+	// headless and a headed instance, so a change has to restart the session.
+	mode := "headed"
+	if p.Headless {
+		mode = "headless"
+	}
+	return "profile:" + p.Name + ":" + mode
 }
 
 // tab returns a context for one operation, in a browser that stays open after
@@ -288,10 +294,16 @@ func (d *ChromedpDriver) tab(ctx context.Context, p Profile) (context.Context, c
 		session := p
 		session.Exe = exe
 
-		// Headed first: YT Studio serves a headless browser its
-		// unsupported-browser page. A machine with no display says so when the
-		// browser starts, and then headless is the only option there is.
-		for _, headless := range []bool{false, true} {
+		// Open order. Default (headed) profiles open headed first and fall back
+		// to headless on a machine with no display. A headless-preference profile
+		// (uploads, channel checks) opens headless first — the UA spoof in
+		// allocate keeps YT Studio from bouncing it — and only falls back to a
+		// headed window if headless will not start at all.
+		order := []bool{false, true}
+		if session.Headless {
+			order = []bool{true, false}
+		}
+		for i, headless := range order {
 			allocCtx, cancelAlloc, err := d.allocate(context.Background(), session, headless)
 			if err != nil {
 				d.mu.Unlock()
@@ -311,8 +323,11 @@ func (d *ChromedpDriver) tab(ctx context.Context, p Profile) (context.Context, c
 			}
 			cancelBrowser()
 			cancelAlloc()
-			if !headless && isNoDisplayErr(err) {
-				d.logf("no display for a browser window, falling back to headless")
+			// Fall back to the next mode if there is one: headed→headless when
+			// the machine has no display, headless→headed when headless will not
+			// start. Otherwise surface the error.
+			if i+1 < len(order) && (headless || isNoDisplayErr(err)) {
+				d.logf("browser did not start (headless=%v: %v); trying %v", headless, err, order[i+1])
 				continue
 			}
 			d.mu.Unlock()
@@ -512,6 +527,9 @@ func detectSignIn(currentURL string) bool {
 // Login opens YouTube Studio non-headless and blocks until the operator
 // closes the browser window. The profile cookies persist after close.
 func (d *ChromedpDriver) Login(ctx context.Context, p Profile) error {
+	// Sign-in is always headed so the operator can see and complete the Google
+	// login, regardless of the upload browser's headless setting.
+	p.Headless = false
 	deadline := DefaultLoginDeadline
 	ctx, cancelTO := context.WithTimeout(ctx, deadline)
 	defer cancelTO()
@@ -538,6 +556,9 @@ func (d *ChromedpDriver) Login(ctx context.Context, p Profile) error {
 // CheckChannel opens YT Studio headlessly and reads the channel name. Returns
 // ErrSessionExpired when the profile no longer has a session.
 func (d *ChromedpDriver) CheckChannel(ctx context.Context, p Profile) (string, error) {
+	// A channel check just reads the signed-in channel name; run it hidden so it
+	// never pops a window (used on boot and from the settings panel).
+	p.Headless = true
 	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
 
