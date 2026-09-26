@@ -1,6 +1,6 @@
 # youtube-tba-upload
 
-A standalone sidecar that uploads FRC match recordings to YouTube and submits
+A standalone uploader that uploads FRC match recordings to YouTube and submits
 the resulting video URLs to The Blue Alliance. It runs as a small HTTP service
 on `:8807` and is designed to be spawned and managed by
 [FIM-AV Assistant](https://github.com/firstinmi/fimav-assistant), which hosts
@@ -17,7 +17,7 @@ playlist, and posts the video to its match on TBA's trusted `match_videos/add`.
 Upload tracking lives in a single SQLite database, `youtube-tba-upload.db`,
 **co-located with the recordings** (the same folder as the `.mp4`s). It is the
 single source of truth — there is no JSON state file. FIM-AV Assistant writes
-the recording / identity / team columns of the `matches` table; this sidecar
+the recording / identity / team columns of the `matches` table; this uploader
 writes only the upload columns. WAL mode lets both processes share the file.
 The schema and column ownership are documented in [INTEGRATION.md](INTEGRATION.md).
 

@@ -27,7 +27,7 @@ import (
 
 // Version is set at build time via -ldflags "-X main.Version=...", the same as
 // the root binary. It surfaces on /api/health so the host app can log which
-// sidecar build it spawned.
+// uploader build it spawned.
 var Version = "dev"
 
 var settings struct {
@@ -184,7 +184,7 @@ func main() {
 	registerYTRoutes(handle)
 
 	// Liveness + identity for the host app (FIM-AV Assistant) that spawns this
-	// as a sidecar: it polls /api/health to know the process is up and serving
+	// as an uploader: it polls /api/health to know the process is up and serving
 	// before it shows the Upload tab, and logs the version it launched.
 	handle(http.MethodGet, "/api/health", func(w http.ResponseWriter, r *http.Request) {
 		si := getSignIn()

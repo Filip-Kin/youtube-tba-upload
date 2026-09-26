@@ -9,7 +9,7 @@ import (
 )
 
 // openStoreFor opens a store on a specific recording folder, standing in for the
-// folder the sidecar watches.
+// folder the uploader watches.
 func openStoreFor(t *testing.T, dir string) *stateStore {
 	t.Helper()
 	old := settings.VideoDir

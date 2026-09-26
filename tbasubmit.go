@@ -4,7 +4,7 @@ package main
 //
 // The root TBA-uploader binary already proxies match_videos/add for its own
 // web UI, but that binary is a separate process the operator has to run. When
-// autoav-helper runs as a sidecar inside FIM-AV Assistant, the whole
+// autoav-helper runs as an uploader inside FIM-AV Assistant, the whole
 // YouTube -> TBA flow has to live here so nothing else needs to be running.
 //
 // The signing and request shape are reused verbatim from the tba package

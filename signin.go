@@ -2,7 +2,7 @@ package main
 
 // YouTube sign-in status and the sign-in / sign-out endpoints.
 //
-// The sidecar keeps a single global sign-in status (which channel the tool
+// The uploader keeps a single global sign-in status (which channel the tool
 // profile is logged into, if any), resolved once on boot and refreshed after a
 // sign-in, a sign-out, or an on-demand channel check. The Upload tab reads it to
 // show "signed in as X" or to prompt a sign-in, instead of discovering an

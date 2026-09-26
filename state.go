@@ -61,7 +61,7 @@ type eventConfig struct {
 	// upload flow. Needs TBAAuthID + TBASecret; does nothing without them.
 	AutoSubmitTBA bool `json:"auto_submit_tba"`
 	// TBAAuthID / TBASecret are the event's trusted-API credentials. The root
-	// TBA-uploader binary takes these per-request from the web UI; the sidecar
+	// TBA-uploader binary takes these per-request from the web UI; the uploader
 	// holds them in config so it can submit without that binary running. They
 	// live only in state.json under the OS data dir, never in the repo.
 	TBAAuthID string `json:"tba_auth_id,omitempty"`
@@ -117,8 +117,8 @@ type videoEntry struct {
 	TBASubmitError string `json:"tba_submit_error,omitempty"`
 }
 
-// eventState is the sidecar's in-memory view. It is persisted to the shared
-// SQLite database (see db.go); the Videos map is projected onto the sidecar's
+// eventState is the uploader's in-memory view. It is persisted to the shared
+// SQLite database (see db.go); the Videos map is projected onto the uploader's
 // columns of the `matches` table. The json tags are what the HTTP API serializes
 // to the Upload tab, and are unchanged from the JSON-file days.
 type eventState struct {

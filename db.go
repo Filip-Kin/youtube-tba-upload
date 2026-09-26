@@ -5,7 +5,7 @@ package main
 //
 // There is exactly one file: fimav-matches.json, in the recording folder beside
 // the .mp4s. FIM-AV Assistant owns the recording/identity/team fields of each
-// match record; this sidecar owns a single "upload" object on the same record.
+// match record; this uploader owns a single "upload" object on the same record.
 // The two processes each do a locked, atomic read-modify-write (a .lock file +
 // temp-file rename), and each only ever touches its own fields, so neither
 // clobbers the other. Reads need no lock — the atomic rename means a reader
@@ -16,7 +16,7 @@ package main
 // breaks its build. JSON needs nothing native on either side. Config is not
 // persisted here (FIM-AV pushes it via /api/upload/config on start and on save),
 // so the manifest stays the only persisted store. Recording never depends on the
-// sidecar being up.
+// uploader being up.
 //
 // The store keeps the same facade the rest of the code used (snapshot()/update),
 // so the upload worker and HTTP handlers didn't change.
@@ -34,15 +34,15 @@ const manifestFileName = "fimav-matches.json"
 
 func manifestPath() string { return filepath.Join(settings.VideoDir, manifestFileName) }
 
-// sidecarStateFileName holds SETTINGS ONLY (config, manual ids, reauth flag) —
+// uploaderStateFileName holds SETTINGS ONLY (config, manual ids, reauth flag) —
 // not match/upload tracking, which is the shared manifest's single source of
 // truth. FIM-AV pushes config over the API; persisting it here just means a
-// sidecar restart doesn't upload with default config before the next push.
-const sidecarStateFileName = "youtube-tba-upload.json"
+// uploader restart doesn't upload with default config before the next push.
+const uploaderStateFileName = "youtube-tba-upload.json"
 
-func sidecarStatePath() string { return filepath.Join(settings.VideoDir, sidecarStateFileName) }
+func uploaderStatePath() string { return filepath.Join(settings.VideoDir, uploaderStateFileName) }
 
-type sidecarState struct {
+type uploaderState struct {
 	Config          eventConfig       `json:"config"`
 	ManualVideoIDs  map[string]string `json:"manual_video_ids,omitempty"`
 	NeedsReauth     bool              `json:"needs_reauth,omitempty"`
@@ -123,7 +123,7 @@ func openStateStore(eventKey string) (*stateStore, error) {
 	return s, nil
 }
 
-// load reads the sidecar's upload state out of the manifest's "upload" objects.
+// load reads the uploader's upload state out of the manifest's "upload" objects.
 func (s *stateStore) load() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -139,9 +139,9 @@ func (s *stateStore) load() error {
 		e.Meta = nil
 		s.state.Videos[m.FileName] = &e
 	}
-	// Settings (config/kv/manual ids) from the sidecar-private file, if present.
-	if data, err := os.ReadFile(sidecarStatePath()); err == nil && len(data) > 0 {
-		var ss sidecarState
+	// Settings (config/kv/manual ids) from the uploader-private file, if present.
+	if data, err := os.ReadFile(uploaderStatePath()); err == nil && len(data) > 0 {
+		var ss uploaderState
 		if json.Unmarshal(data, &ss) == nil {
 			if ss.Config.ProfileName != "" || ss.Config.EventKey != "" {
 				s.state.Config = ss.Config
@@ -184,16 +184,16 @@ func (s *stateStore) update(fn func(*eventState)) error {
 // s.mu (the in-process lock); the .lock file guards against FIM-AV writing at
 // the same instant.
 func (s *stateStore) persistLocked() error {
-	// Settings -> the sidecar-private file (atomic; no shared lock needed, only
+	// Settings -> the uploader-private file (atomic; no shared lock needed, only
 	// this process writes it).
-	ss := sidecarState{
+	ss := uploaderState{
 		Config:          s.state.Config,
 		ManualVideoIDs:  s.state.ManualVideoIDs,
 		NeedsReauth:     s.state.NeedsReauth,
 		LastChannelName: s.state.LastChannelName,
 	}
 	if b, err := json.MarshalIndent(ss, "", "  "); err == nil {
-		_ = writeFileAtomic(sidecarStatePath(), b)
+		_ = writeFileAtomic(uploaderStatePath(), b)
 	}
 
 	if len(s.state.Videos) == 0 {

@@ -1,16 +1,16 @@
 # Integrating youtube-tba-upload with FIM-AV Assistant
 
-This sidecar folds the YouTube match-video uploader into FIM-AV Assistant so the
+This uploader folds the YouTube match-video uploader into FIM-AV Assistant so the
 AV PC runs fewer apps. FIM-AV Assistant spawns this binary, hosts an **Upload**
 tab that talks to its HTTP API on `:8807`, and shares one SQLite database with
 it. The chromedp YouTube automation is NOT reimplemented in TypeScript — it
 stays in this Go binary.
 
 Two ends, one store:
-- **This sidecar** (Go) owns the YouTube upload and the TBA submission, and
+- **This uploader** (Go) owns the YouTube upload and the TBA submission, and
   writes the **upload columns** of the shared database.
 - **FIM-AV Assistant** (Electron/TS) owns recording, hosts the tab, spawns the
-  sidecar, and writes the **recording / identity / team columns**.
+  uploader, and writes the **recording / identity / team columns**.
 
 ---
 
@@ -26,7 +26,7 @@ on either end after migration.
 - Journal mode: **WAL**, `busy_timeout=5000`, `synchronous=NORMAL`. WAL allows
   many readers and one writer across processes; the busy timeout rides out the
   brief moments both write.
-- Concurrency rule: each end writes **only its own columns**. The sidecar's
+- Concurrency rule: each end writes **only its own columns**. The uploader's
   upsert uses `ON CONFLICT(file_name) DO UPDATE` touching only upload columns, so
   it never clobbers FIM-AV's writes, and vice versa.
 
@@ -51,7 +51,7 @@ CREATE TABLE IF NOT EXISTS matches (
     processing_state     TEXT,                    -- unprocessed | queued | processing | done | error
     processing_output    TEXT,
     processing_error     TEXT,
-    -- ── owned by this sidecar (upload + operational) ──
+    -- ── owned by this uploader (upload + operational) ──
     upload_status        TEXT,                    -- new|cutting|stable|uploading|uploaded|failed|skipped
     yt_video_id          TEXT,
     yt_url               TEXT,                    -- https://www.youtube.com/watch?v=<id>
@@ -71,7 +71,7 @@ CREATE TABLE IF NOT EXISTS matches (
     updated_at           TEXT
 );
 
--- sidecar-owned side tables
+-- uploader-owned side tables
 CREATE TABLE IF NOT EXISTS upload_config (
     id          INTEGER PRIMARY KEY CHECK (id = 1),
     event_key   TEXT,
@@ -88,13 +88,13 @@ CREATE TABLE IF NOT EXISTS upload_kv (
 ```
 
 Notes:
-- `upload_status` uses the sidecar's state-machine vocabulary
+- `upload_status` uses the uploader's state-machine vocabulary
   (`new/cutting/stable/uploading/uploaded/failed/skipped`); "stable" is the
   "queued to upload" state. The Upload tab should map these to display states.
-- Until FIM-AV migrates, the sidecar **bootstraps** a `matches` row on first
+- Until FIM-AV migrates, the uploader **bootstraps** a `matches` row on first
   sighting of a file, filling `level/match_number/play/tba_match_key/match_label`
   from the filename. Once FIM-AV creates rows first, that insert is a harmless
-  fallback and the sidecar only updates upload columns.
+  fallback and the uploader only updates upload columns.
 - `upload_config.config_json` holds the event's TBA trusted `auth_id`/`secret`.
   The database is in the recording folder, so treat that folder as sensitive
   (don't sync it to a shared drive). If that is a problem, the credentials can be
@@ -112,13 +112,13 @@ Base `http://localhost:8807`. Permissive CORS; event-scoped routes take
 This is where the tab writes `tba_auth_id`, `tba_secret`, `auto_submit_tba`,
 `playlist_id`+`playlist_name`, templates, visibility, `headless`,
 `thumbnail_path`, and browser profile fields. The template defaults the UI shows
-MUST equal the sidecar defaults in `template.go` (`defaultTitleTemplate`,
+MUST equal the uploader defaults in `template.go` (`defaultTitleTemplate`,
 `defaultDescriptionTemplate`) — supported placeholders are `{video_prefix}`,
 `{event_name}`, `{event_year}`, `{match_level}`, `{match_number}`,
 `{match_label}`, `{play}`, `{play_suffix}`, `{title}`, and
 `{red[i].number}`/`{red[i].name}` / `{blue[i].number}`/`{blue[i].name}`.
 
-Practice and test matches are **never uploaded** — the sidecar hard-excludes
+Practice and test matches are **never uploaded** — the uploader hard-excludes
 those levels (`includeLevel`), so there are no include-practice/test flags.
 
 **State** — `GET /api/upload/state?event_key=E` → `{config, videos, manual_video_ids,
@@ -186,19 +186,19 @@ Follow FIM-AV Assistant's existing idioms (verified against branch
   `-fms-url <fms>`, `-tba-url <tba>`. No `shell: true`.
 - **Readiness**: after spawn, poll `GET /api/health` with
   `fetch`+`AbortSignal.timeout(...)` (the idiom `register-events.ts` already uses
-  to reach the captions sidecar) until it answers, then report running.
+  to reach the captions uploader) until it answers, then report running.
 - **Stop**: `POST /api/shutdown` first (clean browser close + WAL checkpoint),
   then fall back to the `killExisting()` sweep on timeout.
 
 - **Tab**: `src/renderer/pages/upload/index.tsx` (antd + `AddonControlRow`) +
   `Route` in `AppRoutes.tsx` + `TabDef` in `TabBar.tsx`. The renderer can
   `fetch('http://localhost:8807/...')` directly (permissive CORS), as the old Vue
-  UI did and as the LiveCaptions tab reaches its sidecar. Show per-match
+  UI did and as the LiveCaptions tab reaches its uploader. Show per-match
   `upload_status` + `yt_url` link + TBA-submitted, with retry hitting
   `/api/yt/submit-tba`.
 - **Settings**: persist under a new `upload` key in `store.ts` (schema + default
   + dated `migrations` entry), read/written via `upload:getSettings` /
-  `upload:saveSettings` ↔ `upload:settings` IPC, then pushed to the sidecar with
+  `upload:saveSettings` ↔ `upload:settings` IPC, then pushed to the uploader with
   `POST /api/upload/config`.
 
 ---
@@ -261,7 +261,7 @@ Today FIM-AV Assistant keeps match records in `fimav-matches.json`
    - Also write identity columns FIM-AV knows: `event`, `level`, `match_number`,
      `play`, `tba_match_key`, `match_label`.
    - **Write only these FIM-AV-owned columns** (INSERT sets them; UPDATE sets
-     only them). Never touch `upload_*` / operational columns — the sidecar owns
+     only them). Never touch `upload_*` / operational columns — the uploader owns
      those. Use `INSERT ... ON CONFLICT(file_name) DO UPDATE SET <fimav cols>`.
 3. **`listMatches`** for the AutoAV tab now also has the upload columns available
    in the same row, so the tab can show upload status without a second store.
@@ -270,11 +270,11 @@ Today FIM-AV Assistant keeps match records in `fimav-matches.json`
    empty database, initialize cleanly (empty `matches` table). No data migration
    of old JSON is required (events are short-lived); if desired, a one-time
    import can read an existing `fimav-matches.json` into the table on first open.
-5. **Sidecar already reads teams + cut state from the database** (this repo:
+5. **Uploader already reads teams + cut state from the database** (this repo:
    `db.go`/`fimav.go`), not the JSON manifest. So once FIM-AV writes the columns,
    descriptions get team names and the cut-hold gate works, with the JSON gone.
 
-Until step 4 lands, both stores can coexist: the sidecar reads recording state
+Until step 4 lands, both stores can coexist: the uploader reads recording state
 from the database (and treats "no recording data yet" as "don't gate", exactly
 as it treated a missing manifest). "Both ends use the same store" is fully true
 only after the FIM-AV match store is migrated and `fimav-matches.json` retired.
