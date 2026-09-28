@@ -598,7 +598,14 @@ func (d *ChromedpDriver) Login(ctx context.Context, p Profile) (string, error) {
 	defer d.opMu.Unlock()
 
 	// Close any warm (headless) session so this headed window is the only Chrome
-	// on the profile dir; two instances on one dir jam each other.
+	// on the profile dir; two instances on one dir jam each other. Close it
+	// gracefully first so a mid-write kill can't corrupt the profile's cookie DB.
+	d.mu.Lock()
+	existing := d.browserCtx
+	d.mu.Unlock()
+	if existing != nil {
+		_ = chromedp.Cancel(existing)
+	}
 	d.mu.Lock()
 	d.closeSessionLocked()
 	d.mu.Unlock()
@@ -659,6 +666,12 @@ func (d *ChromedpDriver) Login(ctx context.Context, p Profile) (string, error) {
 			}
 			if signedIn(currentURL) && strings.TrimSpace(channelName) != "" {
 				d.logf("login: signed in as %q; closing window", channelName)
+				// Let Chrome finish writing the new session to the profile, then
+				// close it GRACEFULLY (Browser.close) so cookies flush. An abrupt
+				// context-cancel kill drops the just-set session, and the next
+				// headless op comes back "sign-in required".
+				time.Sleep(2500 * time.Millisecond)
+				_ = chromedp.Cancel(browserCtx)
 				return strings.TrimSpace(channelName), nil
 			}
 		}
