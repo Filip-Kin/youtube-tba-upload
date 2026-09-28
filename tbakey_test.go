@@ -42,10 +42,39 @@ func TestTbaMatchKey(t *testing.T) {
 	}
 
 	// Playoff numbering past the bracket's elimination matches becomes finals,
-	// which is how FMS numbers them.
-	p, _ := parseFilename("2026 FSU Roboday Playoff Match 14.mp4")
-	if got := tbaMatchKey(p); got != "f1m1" {
-		t.Errorf("playoff 14 = %q, want f1m1", got)
+	// which is how FMS numbers them. Both the key and the human label follow.
+	for _, c := range []struct {
+		filename  string
+		wantKey   string
+		wantLabel string
+	}{
+		{"2026 FSU Roboday Playoff Match 14.mp4", "f1m1", "Final 1"},
+		{"2026 FSU Roboday Playoff Match 15.mp4", "f1m2", "Final 2"},
+		{"2026 FSU Roboday Playoff Match 16.mp4", "f1m3", "Final 3"},
+		{"2026 FSU Roboday Playoff Match 7.mp4", "sf7m1", "Playoff 7"},
+	} {
+		p, ok := parseFilename(c.filename)
+		if !ok {
+			t.Errorf("%q did not parse", c.filename)
+			continue
+		}
+		if got := tbaMatchKey(p); got != c.wantKey {
+			t.Errorf("tbaMatchKey(%q) = %q, want %q", c.filename, got, c.wantKey)
+		}
+		if got := p.matchLabel(); got != c.wantLabel {
+			t.Errorf("matchLabel(%q) = %q, want %q", c.filename, got, c.wantLabel)
+		}
+	}
+
+	// A junk/overtime number with no bracket slot stays a playoff and gets no
+	// key, so it is never auto-uploaded with a wrong label.
+	if p, ok := parseFilename("2026 FSU Roboday Playoff Match 999.mp4"); ok {
+		if got := tbaMatchKey(p); got != "" {
+			t.Errorf("playoff 999 key = %q, want empty", got)
+		}
+		if got := p.Level; got != "Playoff" {
+			t.Errorf("playoff 999 level = %q, want Playoff", got)
+		}
 	}
 }
 

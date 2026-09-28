@@ -22,6 +22,25 @@ import (
 // assumes the same thing.
 const playoffBracket = tba.BRACKET_TYPE_DOUBLE_ELIM_8_TEAM
 
+// canonical rewrites an off-season "Playoff Match 14" name to "Final 1" when the
+// double-elim bracket resolves that playoff number to the finals round. FMS
+// numbers the 13 elimination matches 1-13 and the finals from 14 up, so a raw
+// playoff number in the finals range would otherwise title the video "Playoff
+// Match 14" and mislabel it. In-season F1M{n} names already carry Level="Final"
+// and pass through untouched. A number with no bracket slot (a junk/overtime
+// number like 999) is left as-is, so it gets no key and is not uploaded.
+func (p parsedFilename) canonical() parsedFilename {
+	if !strings.EqualFold(p.Level, "Playoff") {
+		return p
+	}
+	code := tba.GetPlayoffCode(playoffBracket, p.MatchNumber)
+	if code.Level == "f" {
+		p.Level = "Final"
+		p.MatchNumber = code.Match
+	}
+	return p
+}
+
 // tbaMatchKey returns the match key for a parsed filename, or "" when the
 // filename is not a match TBA knows about (practice, test, manual).
 //

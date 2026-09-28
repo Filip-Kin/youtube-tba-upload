@@ -57,9 +57,17 @@ func TestParseFilename(t *testing.T) {
 			label: "Qualification 5", playSfx: " Play 2",
 		},
 		{
-			in: "2026 Tornado Tumble - Playoff Match 14.mp4",
-			ok: true, level: "Playoff", num: 14, play: 1,
+			in: "2026 Tornado Tumble - Playoff Match 7.mp4",
+			ok: true, level: "Playoff", num: 7, play: 1,
 			prefix: "2026 Tornado Tumble", ext: ".mp4",
+		},
+		{
+			// Off-season playoff numbering past the 13 elimination matches is
+			// the finals; canonicalize relabels it Final N.
+			in: "2026 Tornado Tumble - Playoff Match 14.mp4",
+			ok: true, level: "Final", num: 1, play: 1,
+			prefix: "2026 Tornado Tumble", ext: ".mp4",
+			label: "Final 1",
 		},
 		{in: "garbage.mp4", ok: false},
 		{in: "Random vmix recording.mp4", ok: false},

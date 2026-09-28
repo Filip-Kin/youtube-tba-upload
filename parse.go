@@ -66,9 +66,12 @@ var fimLevels = map[string]string{
 
 func parseFilename(name string) (parsedFilename, bool) {
 	if p, ok := parseTBAFilename(name); ok {
-		return p, true
+		return p.canonical(), true
 	}
-	return parseFIMInSeasonFilename(name)
+	if p, ok := parseFIMInSeasonFilename(name); ok {
+		return p.canonical(), true
+	}
+	return parsedFilename{}, false
 }
 
 func parseTBAFilename(name string) (parsedFilename, bool) {
