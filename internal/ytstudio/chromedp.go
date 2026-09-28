@@ -1798,20 +1798,31 @@ func attachFileViaChooser(ctx context.Context, filePath string, logf func(string
 		_ = chromedp.Run(ctx, page.SetInterceptFileChooserDialog(false))
 	}()
 
+	// The top-bar Create button is a Polymer ytcp-button; a synthetic .click() is
+	// swallowed (it listens for a real pointer gesture), so the dropdown never
+	// opens. Locate it and issue a real CDP mouse click, same as SELECT FILES.
 	logf("step 2: click Create")
+	var cx, cy float64
 	var createInfo string
 	if err := chromedp.Run(ctx,
-		// The top-bar Create button. The class is stable on current Studio.
-		// Fall back to text-based match if the class moves.
-		jsClickFirstResult([]string{
+		shadowLocateBySelector([]string{
 			`ytcp-button.ytcpAppHeaderCreateIcon`,
+			`ytcp-button#create-icon-button`,
 			`#create-icon-button`,
-		}, &createInfo),
-		chromedp.Sleep(700*time.Millisecond),
+		}, &cx, &cy, &createInfo),
+	); err != nil {
+		return fmt.Errorf("locate create: %w", err)
+	}
+	if createInfo == "" {
+		return errors.New("could not find Create button")
+	}
+	if err := chromedp.Run(ctx,
+		humanClick(cx, cy),
+		chromedp.Sleep(600*time.Millisecond),
 	); err != nil {
 		return fmt.Errorf("click create: %w", err)
 	}
-	logf("step 2: Create matched %s", createInfo)
+	logf("step 2: Create clicked at (%.0f,%.0f) %s", cx, cy, createInfo)
 
 	logf("step 2: shadow-pierce click Upload videos")
 	uploadMenuSelectors := []string{"tp-yt-paper-item", "ytcp-text-menu-item", "[role=menuitem]", "yt-formatted-string"}
