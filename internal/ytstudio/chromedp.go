@@ -581,20 +581,42 @@ func (d *ChromedpDriver) Login(ctx context.Context, p Profile) (string, error) {
 	d.closeSessionLocked()
 	d.mu.Unlock()
 
-	allocCtx, cancelAlloc, err := d.allocate(context.Background(), p, false)
-	if err != nil {
-		return "", err
+	// Open the headed window, retrying a few times. Cancelling the warm session
+	// above kills its Chrome asynchronously, and if the new headed launch beats
+	// that exit, Chrome forwards it to the dying instance ("Opening in existing
+	// browser session") and no visible window appears. A short wait + retry lets
+	// the old process release the profile dir first.
+	var (
+		browserCtx    context.Context
+		cancelAlloc   context.CancelFunc
+		cancelBrowser context.CancelFunc
+	)
+	var lastErr error
+	for attempt := 1; attempt <= 4; attempt++ {
+		ac, ca, err := d.allocate(context.Background(), p, false)
+		if err != nil {
+			return "", err
+		}
+		bc, cb := chromedp.NewContext(ac)
+		if err := chromedp.Run(bc,
+			applyStealth(),
+			chromedp.Navigate("https://studio.youtube.com"),
+		); err != nil {
+			cb()
+			ca()
+			lastErr = err
+			d.logf("login: window did not open (attempt %d: %v); retrying", attempt, err)
+			time.Sleep(800 * time.Millisecond)
+			continue
+		}
+		browserCtx, cancelAlloc, cancelBrowser = bc, ca, cb
+		break
+	}
+	if browserCtx == nil {
+		return "", wrapLiveErr(p, p.DebugPort, lastErr)
 	}
 	defer cancelAlloc() // closing the allocator shuts the window when we return
-	browserCtx, cancelBrowser := chromedp.NewContext(allocCtx)
 	defer cancelBrowser()
-
-	if err := chromedp.Run(browserCtx,
-		applyStealth(),
-		chromedp.Navigate("https://studio.youtube.com"),
-	); err != nil {
-		return "", wrapLiveErr(p, p.DebugPort, err)
-	}
 	d.logf("login: window open, waiting for sign-in")
 
 	ticker := time.NewTicker(1500 * time.Millisecond)
