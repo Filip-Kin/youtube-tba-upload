@@ -117,10 +117,11 @@ type Driver interface {
 	// has been signed out.
 	CheckChannel(ctx context.Context, profile Profile) (string, error)
 
-	// Login opens the browser non-headless and blocks until the operator
-	// closes the window. The profile is left in whatever state the operator
-	// leaves it in. Not needed for a live profile, which is already signed in.
-	Login(ctx context.Context, profile Profile) error
+	// Login opens a single headed window and waits for the operator to sign in.
+	// It returns the signed-in channel name and closes the window as soon as
+	// sign-in lands; an empty name means the operator closed it first or the
+	// deadline passed. Not needed for a live profile, which is already signed in.
+	Login(ctx context.Context, profile Profile) (string, error)
 
 	// ListPlaylists returns the channel's playlists (id + title) by scraping the
 	// Studio playlists page, plus the resolved channel id. Passing a known

@@ -64,20 +64,14 @@ func verifyChannelOnBoot() {
 	}
 }
 
-// afterLogin runs once a manual sign-in window closes. It re-checks the channel
-// to record the signed-in state, warms the playlist cache, and resumes any
-// upload loops that had stopped for re-auth. The channel check reopens the
-// browser headless, but opMu serializes it behind the sign-in that just closed,
-// so the two never race on the profile.
-func afterLogin(profile ytstudio.Profile) {
-	name, err := driver.CheckChannel(context.Background(), profile)
-	if err != nil {
-		setSignIn(signInState{SignedIn: false, Error: err.Error()})
-		log.Printf("after login: channel check failed: %v", err)
-		return
-	}
-	setSignIn(signInState{SignedIn: true, ChannelName: name})
-	log.Printf("after login: signed in as %q", name)
+// afterLogin runs once sign-in lands (Login already read the channel name and
+// closed the window). It records the signed-in state, warms the playlist cache,
+// and resumes any upload loops that had stopped for re-auth. The playlist warm
+// reopens the browser headless, but opMu serializes it behind the login that
+// just closed, so the two never race on the profile.
+func afterLogin(profile ytstudio.Profile, channelName string) {
+	setSignIn(signInState{SignedIn: true, ChannelName: channelName})
+	log.Printf("after login: signed in as %q", channelName)
 	if _, err := refreshPlaylists(context.Background(), profile); err != nil {
 		log.Printf("after login: playlist prefetch failed: %v", err)
 	}

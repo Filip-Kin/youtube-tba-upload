@@ -548,33 +548,77 @@ func detectSignIn(currentURL string) bool {
 	return strings.Contains(u, "accounts.google") || strings.Contains(u, "/signin")
 }
 
-// Login opens YouTube Studio non-headless and blocks until the operator
-// closes the browser window. The profile cookies persist after close.
-func (d *ChromedpDriver) Login(ctx context.Context, p Profile) error {
-	// Sign-in is always headed so the operator can see and complete the Google
-	// login, regardless of the upload browser's headless setting.
-	p.Headless = false
-	deadline := DefaultLoginDeadline
-	ctx, cancelTO := context.WithTimeout(ctx, deadline)
+// signedIn reports whether Studio has landed on a signed-in channel page
+// (studio.youtube.com/channel/<id>) rather than a Google sign-in redirect.
+func signedIn(currentURL string) bool {
+	u := strings.ToLower(currentURL)
+	return strings.Contains(u, "/channel/") && !detectSignIn(u)
+}
+
+// Login opens a single headed YouTube Studio window on the tool profile and
+// waits for the operator to sign in. It returns the signed-in channel name and
+// closes the window as soon as sign-in lands (Studio redirects to
+// /channel/<id>), so the operator never has to close it by hand. If the operator
+// closes the window first, or the deadline passes, it returns an empty name and
+// no error.
+//
+// Unlike other operations it runs its OWN dedicated browser, not the warm shared
+// session: allocating from the allocator navigates the browser's first tab, so
+// there is one window with one tab (no leftover about:blank). It still holds
+// opMu, so it can't race an upload or a channel check on the same profile dir,
+// and closes any warm session first for the same reason.
+func (d *ChromedpDriver) Login(ctx context.Context, p Profile) (string, error) {
+	p.Headless = false // always headed; the operator has to see the Google login
+	ctx, cancelTO := context.WithTimeout(ctx, DefaultLoginDeadline)
 	defer cancelTO()
 
-	browserCtx, closeTab, err := d.tab(ctx, p)
+	d.opMu.Lock()
+	defer d.opMu.Unlock()
+
+	// Close any warm (headless) session so this headed window is the only Chrome
+	// on the profile dir; two instances on one dir jam each other.
+	d.mu.Lock()
+	d.closeSessionLocked()
+	d.mu.Unlock()
+
+	allocCtx, cancelAlloc, err := d.allocate(context.Background(), p, false)
 	if err != nil {
-		return err
+		return "", err
 	}
-	defer closeTab()
+	defer cancelAlloc() // closing the allocator shuts the window when we return
+	browserCtx, cancelBrowser := chromedp.NewContext(allocCtx)
+	defer cancelBrowser()
 
 	if err := chromedp.Run(browserCtx,
 		applyStealth(),
 		chromedp.Navigate("https://studio.youtube.com"),
 	); err != nil {
-		return wrapLiveErr(p, p.DebugPort, err)
+		return "", wrapLiveErr(p, p.DebugPort, err)
 	}
-	d.logf("login: browser open, waiting for operator to close")
-	// chromedp.NewContext registers a target-detached handler; when the
-	// operator closes the window, browserCtx.Done() fires.
-	<-browserCtx.Done()
-	return nil
+	d.logf("login: window open, waiting for sign-in")
+
+	ticker := time.NewTicker(1500 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-browserCtx.Done():
+			return "", nil // operator closed the window
+		case <-ctx.Done():
+			return "", nil // gave up waiting; not an error
+		case <-ticker.C:
+			var currentURL, channelName string
+			if err := chromedp.Run(browserCtx,
+				chromedp.Location(&currentURL),
+				chromedp.Evaluate(jsReadChannelName, &channelName),
+			); err != nil {
+				continue // mid-navigation, or the window is closing
+			}
+			if signedIn(currentURL) && strings.TrimSpace(channelName) != "" {
+				d.logf("login: signed in as %q; closing window", channelName)
+				return strings.TrimSpace(channelName), nil
+			}
+		}
+	}
 }
 
 // CheckChannel opens YT Studio headlessly and reads the channel name. Returns

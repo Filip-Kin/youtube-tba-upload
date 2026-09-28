@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -44,6 +45,9 @@ var (
 	managers   = map[string]*uploadManager{}
 	managersMu sync.Mutex
 	driver     ytstudio.Driver
+	// loginInFlight is true while a sign-in window is open, so repeated clicks
+	// don't queue a stack of Login calls behind opMu.
+	loginInFlight atomic.Bool
 )
 
 func main() {
@@ -789,16 +793,26 @@ func apiUploadProfileLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	profile := profileForRequest(body.EventKey, body.ProfileName)
-	// Login blocks for as long as the browser stays open. Run it in a
-	// goroutine so the HTTP request returns immediately; the operator
-	// closes the window to finish. Use context.Background() because
-	// r.Context() is canceled the moment we write the response.
+	// One login window at a time. Without this, every click queues another
+	// Login behind opMu, and closing one window just opens the next (seen live).
+	if !loginInFlight.CompareAndSwap(false, true) {
+		writeJSON(w, map[string]bool{"ok": true, "already": true})
+		return
+	}
+	// Login runs the window and returns the channel name once sign-in lands (it
+	// closes the window itself). Run it off the request goroutine; use
+	// context.Background() because r.Context() is canceled when we respond.
 	go func(p ytstudio.Profile) {
-		if err := driver.Login(context.Background(), p); err != nil {
+		defer loginInFlight.Store(false)
+		name, err := driver.Login(context.Background(), p)
+		if err != nil {
 			log.Printf("login (%s): %v", p.Label(), err)
 			return
 		}
-		afterLogin(p)
+		if name == "" {
+			return // operator closed the window without signing in
+		}
+		afterLogin(p, name)
 	}(profile)
 	writeJSON(w, map[string]bool{"ok": true})
 }
