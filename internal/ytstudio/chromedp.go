@@ -986,9 +986,17 @@ func (d *ChromedpDriver) Upload(ctx context.Context, p Profile, in UploadInput) 
 		videoID     string
 	)
 
-	// Step 1: navigate to YT Studio and check we're signed in.
+	// Step 1: navigate to YT Studio and check we're signed in. Pin the layout
+	// viewport with CDP device metrics (not just the window-size flag): headless's
+	// default metrics leave getBoundingClientRect coords out of step with the
+	// compositor hit-test, so mouse clicks land in the wrong place.
 	d.logf("step 1: navigate to studio")
 	if err := chromedp.Run(bctx,
+		chromedp.EmulateViewport(1400, 900),
+		// Bring the tab to the foreground: headless does not compute layout for a
+		// background tab, so getBoundingClientRect is 0 and every coordinate click
+		// in the upload dialog misses. This is what lets the publish flow work.
+		page.BringToFront(),
 		applyStealth(),
 		chromedp.Navigate("https://studio.youtube.com"),
 		chromedp.Sleep(3*time.Second),
@@ -1019,34 +1027,58 @@ func (d *ChromedpDriver) Upload(ctx context.Context, p Profile, in UploadInput) 
 	d.logf("file attached: %s", abs)
 
 	// Step 3: details — title, description. A big file keeps Studio busy for a
-	// while before it swaps the details dialog in.
-	if err := chromedp.Run(bctx,
-		chromedp.WaitVisible("#title-textarea", chromedp.ByQuery),
-		chromedp.Sleep(500*time.Millisecond),
-	); err != nil {
-		return UploadResult{}, fmt.Errorf("wait for details dialog: %w", err)
+	// while before it swaps the details dialog in. The controls live in shadow
+	// DOM, so wait for the title box with a pierced poll (plain WaitVisible does
+	// not cross shadow roots).
+	titleReady := false
+	step3Deadline := time.Now().Add(90 * time.Second)
+	for time.Now().Before(step3Deadline) {
+		var found bool
+		_ = chromedp.Run(bctx, chromedp.Evaluate(jsShadowExists("#title-textarea"), &found))
+		if found {
+			titleReady = true
+			break
+		}
+		_ = chromedp.Run(bctx, chromedp.Sleep(700*time.Millisecond))
 	}
-	if err := chromedp.Run(bctx, setTextbox("#title-textarea #textbox", in.Title, d.logf)); err != nil {
-		return UploadResult{}, fmt.Errorf("fill title: %w", err)
+	if !titleReady {
+		var form string
+		_ = chromedp.Run(bctx, dumpFormControls(&form))
+		d.logf("step 3: details dialog not found; form controls seen: %s", form)
+		return UploadResult{}, errors.New("wait for details dialog: #title-textarea never appeared")
+	}
+	// Every control below lives in an OPEN shadow root, so it is driven with the
+	// pierced locate + real mouse gesture helpers; document.querySelector clicks
+	// and text sets do not cross the shadow boundary.
+
+	// Title: Studio auto-fills it from the filename; replace it with the rendered
+	// title. Non-fatal — the auto-filled title is an acceptable fallback.
+	if err := pierceSetText(bctx, "#title-textarea", in.Title); err != nil {
+		d.logf("title not set: %v (keeping auto-filled)", err)
+	} else {
+		d.logf("title set")
 	}
 	descriptionError := ""
-	if err := chromedp.Run(bctx, setTextbox("#description-textarea #textbox", in.Description, d.logf)); err != nil {
-		// A missing description is not worth abandoning a match video for, but a
-		// swallowed failure is how a video quietly goes up with no description.
-		// Record it so the operator can see it and backfill.
-		d.logf("description not set: %v (continuing)", err)
-		descriptionError = err.Error()
-	}
-	// Studio will not enable Next until the audience question is answered, and
-	// a channel without a default has it blank. Match videos are not made for
-	// kids.
-	if err := chromedp.Run(bctx, answerAudience(d.logf)); err != nil {
-		d.logf("audience: %v (continuing)", err)
+	if in.Description != "" {
+		if err := pierceSetText(bctx, "#description-textarea", in.Description); err != nil {
+			d.logf("description not set: %v (continuing)", err)
+			descriptionError = err.Error()
+		} else {
+			d.logf("description set")
+		}
 	}
 
-	// Step 4: thumbnail (optional). The thumbnail tile has its own hidden
-	// <input type=file accept=image/*>; finding it by accept attribute keeps
-	// us off the main video input.
+	// Audience: Studio blocks Next until "made for kids" is answered.
+	if ok, _ := pierceClick(bctx,
+		`tp-yt-paper-radio-button[name='VIDEO_MADE_FOR_KIDS_NOT_MFK']`,
+		`tp-yt-paper-radio-button[name*='NOT_MFK']`,
+	); ok {
+		d.logf("audience: not made for kids")
+	} else {
+		d.logf("audience: radio not found (continuing)")
+	}
+
+	// Thumbnail (optional).
 	if thumbAbs != "" {
 		d.logf("step 4: attaching thumbnail")
 		if err := attachThumbnailViaChooser(bctx, thumbAbs, d.logf); err != nil {
@@ -1056,8 +1088,7 @@ func (d *ChromedpDriver) Upload(ctx context.Context, p Profile, in UploadInput) 
 		}
 	}
 
-	// Step 4.5: set the playlist here, in the dialog, where it needs no video
-	// ID. The dialog's own Save commits it along with everything else.
+	// Playlist, in the dialog (needs no video ID; the dialog's Save commits it).
 	playlistSet := false
 	if in.PlaylistName != "" {
 		if err := d.selectPlaylist(bctx, in.PlaylistName); err != nil {
@@ -1068,57 +1099,45 @@ func (d *ChromedpDriver) Upload(ctx context.Context, p Profile, in UploadInput) 
 		}
 	}
 
-	// Step 5: give the copyright checks a chance to finish, then carry on
-	// regardless.
-	//
-	// This must never be fatal. YouTube words the banner differently over time,
-	// it does not appear at all on a video Studio has already processed, and
-	// nothing in the rest of the flow depends on it: a video can be published
-	// while its checks are still running. Treating a missing banner as an error
-	// is what strands an upload on the first screen of the dialog with only the
-	// title filled in.
-	checksCtx, cancelChecks := context.WithTimeout(bctx, DefaultChecksCompleteDeadline)
-	defer cancelChecks()
-	if err := chromedp.Run(checksCtx,
-		waitForText(`checks complete|no issues found|no copyright issues`),
-	); err != nil {
-		d.logf("checks banner never appeared (%v), carrying on without it", err)
-	} else {
-		d.logf("checks complete")
+	// Step 6: advance DETAILS -> VIDEO_ELEMENTS -> CHECKS -> REVIEW by clicking
+	// Next, until the visibility radios appear. Next is disabled briefly while a
+	// step settles, so poll.
+	d.logf("step 6: advancing to review")
+	reachedReview := false
+	advanceDeadline := time.Now().Add(90 * time.Second)
+	for time.Now().Before(advanceDeadline) {
+		var atVis bool
+		_ = chromedp.Run(bctx, chromedp.Evaluate(jsShadowExists(`tp-yt-paper-radio-button[name='PUBLIC']`), &atVis))
+		if atVis {
+			reachedReview = true
+			break
+		}
+		if ok, _ := pierceClick(bctx, "ytcp-button#next-button"); !ok {
+			_ = chromedp.Run(bctx, chromedp.Sleep(800*time.Millisecond))
+		}
+		_ = chromedp.Run(bctx, chromedp.Sleep(1200*time.Millisecond))
+	}
+	if !reachedReview {
+		return UploadResult{}, errors.New("never reached the visibility step")
 	}
 
-	// Step 6: walk to the Visibility step. The dialog uses test-id buttons.
-	// An end-screen modal left open by a previous run swallows those clicks.
-	_ = chromedp.Run(bctx, closeEndscreenModal(d.logf))
-	if err := chromedp.Run(bctx,
-		jsClick(`button[test-id='VIDEO_ELEMENTS']`),
-		chromedp.Sleep(500*time.Millisecond),
-		jsClick(`button[test-id='REVIEW']`),
-		chromedp.Sleep(500*time.Millisecond),
-		jsClick(`button[test-id='REVIEW']`), // some flows need it twice to advance
-		chromedp.Sleep(500*time.Millisecond),
-		chromedp.WaitVisible("tp-yt-paper-radio-button", chromedp.ByQuery),
-		jsClick(fmt.Sprintf(`tp-yt-paper-radio-button[name='%s']`, visibility)),
-		chromedp.Sleep(500*time.Millisecond),
-	); err != nil {
-		return UploadResult{}, fmt.Errorf("advance to visibility: %w", err)
+	// Visibility radio.
+	if ok, _ := pierceClick(bctx, fmt.Sprintf(`tp-yt-paper-radio-button[name='%s']`, visibility)); !ok {
+		return UploadResult{}, fmt.Errorf("visibility radio %q not found", visibility)
 	}
+	d.logf("visibility set to %s", visibility)
+	_ = chromedp.Run(bctx, chromedp.Sleep(500*time.Millisecond))
 
-	// Step 7: capture the 11-char video ID from the dialog before saving.
-	_ = chromedp.Run(bctx,
-		chromedp.Evaluate(jsExtractVideoID, &videoID),
-	)
+	// Step 7: capture the 11-char video ID before saving.
+	_ = chromedp.Run(bctx, chromedp.Evaluate(jsExtractVideoID, &videoID))
 	d.logf("captured video id (pre-save): %q", videoID)
 
-	// Step 8: click Save.
-	if err := chromedp.Run(bctx,
-		jsClick(`ytcp-button[id='done-button'], button[aria-label='Save']:not([disabled])`),
-		chromedp.Sleep(3*time.Second),
-	); err != nil {
-		return UploadResult{}, fmt.Errorf("save: %w", err)
+	// Step 8: publish (Done).
+	if ok, err := pierceClick(bctx, "ytcp-button#done-button"); err != nil || !ok {
+		return UploadResult{}, fmt.Errorf("click done: ok=%v err=%v", ok, err)
 	}
+	_ = chromedp.Run(bctx, chromedp.Sleep(3*time.Second))
 
-	// Fallback ID recovery if not captured pre-save.
 	if videoID == "" {
 		_ = chromedp.Run(bctx,
 			chromedp.Sleep(2*time.Second),
@@ -1778,124 +1797,138 @@ func attachThumbnailViaChooser(ctx context.Context, filePath string, logf func(s
 	}
 }
 
+// jsDismissWelcome removes the first-run "Welcome to YouTube Studio"
+// (ytcp-warm-welcome-dialog) and its backdrop. A fresh channel shows it over the
+// dashboard where it swallows every click; established channels never see it.
+const jsDismissWelcome = `(() => {
+	let n = 0;
+	function walk(root) {
+		for (const el of root.querySelectorAll('ytcp-warm-welcome-dialog,tp-yt-iron-overlay-backdrop')) { el.remove(); n++; }
+		for (const el of root.querySelectorAll('*')) if (el.shadowRoot) walk(el.shadowRoot);
+	}
+	walk(document);
+	return n;
+})()`
+
 func attachFileViaChooser(ctx context.Context, filePath string, logf func(string, ...any)) error {
-	// Listener captures the backend node ID of the file chooser when it opens.
-	// Buffered so a slow consumer doesn't deadlock the CDP event dispatcher.
-	chooserCh := make(chan cdp.BackendNodeID, 1)
-	chromedp.ListenTarget(ctx, func(ev interface{}) {
-		if e, ok := ev.(*page.EventFileChooserOpened); ok {
-			select {
-			case chooserCh <- e.BackendNodeID:
-			default:
+	// Clear the first-run welcome dialog; on a fresh channel it covers the
+	// dashboard and eats the upload click.
+	var removed int
+	_ = chromedp.Run(ctx, chromedp.Evaluate(jsDismissWelcome, &removed))
+	if removed > 0 {
+		logf("step 2: dismissed warm-welcome dialog (%d nodes)", removed)
+	}
+
+	// Open the upload dialog via the dashboard's Upload-videos button (or the
+	// header upload icon). It is a Polymer ytcp-button that ignores a synthetic
+	// .click(), so locate and issue a real mouse gesture. The dashboard is still
+	// settling, so retry until the uploads dialog is actually visible.
+	logf("step 2: open upload dialog")
+	dialogOpen := false
+	openDeadline := time.Now().Add(40 * time.Second)
+	for time.Now().Before(openDeadline) {
+		var vis bool
+		_ = chromedp.Run(ctx, chromedp.Evaluate(jsShadowVisible("ytcp-uploads-dialog"), &vis))
+		if vis {
+			dialogOpen = true
+			break
+		}
+		if ok, _ := pierceClick(ctx,
+			`ytcp-button#upload-button`,
+			`ytcp-icon-button#upload-icon`,
+		); ok {
+			_ = chromedp.Run(ctx, chromedp.Sleep(2500*time.Millisecond))
+		} else {
+			_ = chromedp.Run(ctx, chromedp.Sleep(1000*time.Millisecond))
+		}
+	}
+	if !dialogOpen {
+		return errors.New("upload dialog never opened")
+	}
+	logf("step 2: upload dialog open")
+
+	// Set the hidden Filedata input directly (pierced, closed-shadow-safe). Studio's
+	// own change handler starts the upload and swaps in the metadata editor — no
+	// SELECT FILES click or native chooser needed.
+	var bnid cdp.BackendNodeID
+	inputDeadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(inputDeadline) {
+		if id := findFiledataInput(ctx); id != 0 {
+			bnid = id
+			break
+		}
+		_ = chromedp.Run(ctx, chromedp.Sleep(500*time.Millisecond))
+	}
+	if bnid == 0 {
+		return errors.New("could not find the Filedata upload input")
+	}
+	logf("step 2: Filedata input backend node %d", bnid)
+	if err := chromedp.Run(ctx, dom.SetFileInputFiles([]string{filePath}).WithBackendNodeID(bnid)); err != nil {
+		return fmt.Errorf("set file input: %w", err)
+	}
+	return nil
+}
+
+// findFiledataInput returns the backend node ID of Studio's upload input
+// (input[type=file][name=Filedata]), piercing shadow roots (including the
+// file-picker's closed root). Returns 0 when it is not present yet.
+func findFiledataInput(ctx context.Context) cdp.BackendNodeID {
+	var found cdp.BackendNodeID
+	_ = chromedp.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
+		doc, err := dom.GetDocument().WithDepth(-1).WithPierce(true).Do(ctx)
+		if err != nil {
+			return err
+		}
+		var walk func(n *cdp.Node)
+		walk = func(n *cdp.Node) {
+			if found != 0 || n == nil {
+				return
+			}
+			if strings.EqualFold(n.NodeName, "INPUT") {
+				var isFile bool
+				var name string
+				for i := 0; i+1 < len(n.Attributes); i += 2 {
+					switch {
+					case strings.EqualFold(n.Attributes[i], "type") && strings.EqualFold(n.Attributes[i+1], "file"):
+						isFile = true
+					case strings.EqualFold(n.Attributes[i], "name"):
+						name = n.Attributes[i+1]
+					}
+				}
+				if isFile && name == "Filedata" {
+					found = n.BackendNodeID
+					return
+				}
+			}
+			for _, c := range n.Children {
+				walk(c)
+			}
+			for _, sr := range n.ShadowRoots {
+				walk(sr)
+			}
+			if n.ContentDocument != nil {
+				walk(n.ContentDocument)
 			}
 		}
-	})
+		walk(doc)
+		return nil
+	}))
+	return found
+}
 
-	if err := chromedp.Run(ctx, page.SetInterceptFileChooserDialog(true)); err != nil {
-		return fmt.Errorf("enable chooser intercept: %w", err)
-	}
-	defer func() {
-		_ = chromedp.Run(ctx, page.SetInterceptFileChooserDialog(false))
-	}()
-
-	// The top-bar Create button is a Polymer ytcp-button; a synthetic .click() is
-	// swallowed (it listens for a real pointer gesture), so the dropdown never
-	// opens. Locate it and issue a real CDP mouse click, same as SELECT FILES.
-	logf("step 2: click Create")
-	var cx, cy float64
-	var createInfo string
-	if err := chromedp.Run(ctx,
-		shadowLocateBySelector([]string{
-			`ytcp-button.ytcpAppHeaderCreateIcon`,
-			`ytcp-button#create-icon-button`,
-			`#create-icon-button`,
-		}, &cx, &cy, &createInfo),
-	); err != nil {
-		return fmt.Errorf("locate create: %w", err)
-	}
-	if createInfo == "" {
-		return errors.New("could not find Create button")
-	}
-	if err := chromedp.Run(ctx,
-		humanClick(cx, cy),
-		chromedp.Sleep(600*time.Millisecond),
-	); err != nil {
-		return fmt.Errorf("click create: %w", err)
-	}
-	logf("step 2: Create clicked at (%.0f,%.0f) %s", cx, cy, createInfo)
-
-	logf("step 2: shadow-pierce click Upload videos")
-	uploadMenuSelectors := []string{"tp-yt-paper-item", "ytcp-text-menu-item", "[role=menuitem]", "yt-formatted-string"}
-	var uploadInfo string
-	uploadDeadline := time.Now().Add(8 * time.Second)
-	for time.Now().Before(uploadDeadline) {
-		// Substring (not anchored): the item's textContent may carry an icon or
-		// extra whitespace around "Upload videos"/"Upload video".
-		_ = chromedp.Run(ctx, shadowClickByText(
-			uploadMenuSelectors,
-			regexp.MustCompile(`(?i)upload\s*videos?`),
-			&uploadInfo,
-		))
-		if uploadInfo != "" {
-			break
+// jsShadowVisible returns a JS expression (bool) true when a visible element
+// matching sel exists anywhere, piercing open shadow roots.
+func jsShadowVisible(sel string) string {
+	return fmt.Sprintf(`(() => {
+		let vis = false;
+		function walk(root) {
+			const e = root.querySelector(%q);
+			if (e && e.offsetParent !== null) { vis = true; return; }
+			for (const x of root.querySelectorAll('*')) if (x.shadowRoot) walk(x.shadowRoot);
 		}
-		_ = chromedp.Run(ctx, chromedp.Sleep(400*time.Millisecond))
-	}
-	if uploadInfo == "" {
-		var menu string
-		_ = chromedp.Run(ctx, dumpVisibleText(uploadMenuSelectors, &menu))
-		logf("step 2: Create menu items seen: %s", menu)
-		return errors.New("could not find Upload videos menu item")
-	}
-	logf("step 2: Upload-videos matched %s", uploadInfo)
-
-	// The upload modal opens but doesn't auto-trigger the native file chooser.
-	// We have to click the "Select files" button inside it. The button is a
-	// ytcp-button (Polymer custom element) whose click handler listens for
-	// the full pointerdown/pointerup gesture sequence — a synthetic .click()
-	// in JS is ignored. So we shadow-walk to find the button's screen
-	// coordinates, then issue a real CDP mouse click there.
-	logf("step 2: locate SELECT FILES button")
-	selectFilesSelectors := []string{"ytcp-button#select-files-button", "ytcp-button", "button", "[role=button]"}
-	var sx, sy float64
-	var selectInfo string
-	selectDeadline := time.Now().Add(12 * time.Second)
-	for time.Now().Before(selectDeadline) {
-		// pit-podcast: r"select file|choose file" — either phrasing, substring
-		// (not anchored), because the rendered text may wrap.
-		_ = chromedp.Run(ctx, shadowLocateByText(
-			selectFilesSelectors,
-			regexp.MustCompile(`(?i)select\s*files?|choose\s*files?`),
-			&sx, &sy, &selectInfo,
-		))
-		if selectInfo != "" {
-			break
-		}
-		_ = chromedp.Run(ctx, chromedp.Sleep(400*time.Millisecond))
-	}
-	if selectInfo == "" {
-		var btns string
-		_ = chromedp.Run(ctx, dumpVisibleText([]string{"ytcp-button", "button", "[role=button]"}, &btns))
-		logf("step 2: buttons seen: %s", btns)
-		return errors.New("could not find SELECT FILES button")
-	}
-	logf("step 2: SELECT FILES at (%.0f,%.0f) %s", sx, sy, selectInfo)
-	if err := chromedp.Run(ctx,
-		humanSleep(250*time.Millisecond, 600*time.Millisecond),
-		humanClick(sx, sy),
-	); err != nil {
-		return fmt.Errorf("native click select-files: %w", err)
-	}
-
-	select {
-	case bnid := <-chooserCh:
-		logf("step 2: chooser opened on backend node %d", bnid)
-		return chromedp.Run(ctx, dom.SetFileInputFiles([]string{filePath}).WithBackendNodeID(bnid))
-	case <-time.After(30 * time.Second):
-		return errors.New("file chooser never opened after clicking SELECT FILES")
-	case <-ctx.Done():
-		return ctx.Err()
-	}
+		walk(document);
+		return vis;
+	})()`, sel)
 }
 
 // jsClickFirstResult tries each selector in order and clicks the first
@@ -2366,6 +2399,126 @@ func dumpVisibleText(selectors []string, out *string) chromedp.Action {
 			return [...seen].slice(0, 30).join(' | ');
 		})()
 	`, selArr)
+	return chromedp.Evaluate(js, out)
+}
+
+// pierceClick locates the first visible element matching any selector across
+// shadow roots and clicks it with a real mouse gesture (Studio's Polymer buttons
+// ignore synthetic .click()). Returns false when nothing matched.
+func pierceClick(ctx context.Context, selectors ...string) (bool, error) {
+	var x, y float64
+	var info string
+	if err := chromedp.Run(ctx, shadowLocateBySelector(selectors, &x, &y, &info)); err != nil {
+		return false, err
+	}
+	if info == "" {
+		return false, nil
+	}
+	return true, chromedp.Run(ctx, humanClick(x, y), chromedp.Sleep(500*time.Millisecond))
+}
+
+// pierceSetText focuses a contenteditable host (pierced + real click) and types
+// value into it, replacing any existing content. Studio's title/description
+// boxes are contenteditable elements inside shadow DOM.
+func pierceSetText(ctx context.Context, hostSelector, value string) error {
+	var x, y float64
+	var info string
+	if err := chromedp.Run(ctx, shadowLocateBySelector([]string{hostSelector}, &x, &y, &info)); err != nil {
+		return err
+	}
+	if info == "" {
+		return fmt.Errorf("%s not found", hostSelector)
+	}
+	var ok bool
+	js := fmt.Sprintf(`(() => {
+		document.execCommand('selectAll', false, null);
+		document.execCommand('insertText', false, %q);
+		const a = document.activeElement;
+		if (a) a.dispatchEvent(new Event('input', {bubbles: true}));
+		return true;
+	})()`, value)
+	return chromedp.Run(ctx,
+		humanClick(x, y),
+		chromedp.Sleep(250*time.Millisecond),
+		chromedp.Evaluate(js, &ok),
+		chromedp.Sleep(300*time.Millisecond),
+	)
+}
+
+// jsShadowExists returns a JS expression (bool) that is true when a visible
+// element matching sel exists anywhere, piercing shadow roots.
+func jsShadowExists(sel string) string {
+	return fmt.Sprintf(`
+		(() => {
+			let hit = false;
+			function walk(root) {
+				if (hit) return;
+				const el = root.querySelector(%q);
+				if (el && el.offsetParent !== null) { hit = true; return; }
+				for (const e of root.querySelectorAll('*')) {
+					if (e.shadowRoot) walk(e.shadowRoot);
+					if (hit) return;
+				}
+			}
+			walk(document);
+			return hit;
+		})()
+	`, sel)
+}
+
+// dumpFormControls lists the visible form controls of the upload details dialog
+// (inputs, textareas, contenteditables, test-id buttons, visibility radios),
+// piercing shadow DOM, as tag#id[attrs] — diagnostics for wiring step 3-6.
+func dumpFormControls(out *string) chromedp.Action {
+	js := `
+		(() => {
+			const hits = [];
+			function desc(el) {
+				const a = [];
+				if (el.id) a.push('#' + el.id);
+				const t = el.getAttribute('test-id'); if (t) a.push('test-id=' + t);
+				const n = el.getAttribute('name'); if (n) a.push('name=' + n);
+				const al = el.getAttribute('aria-label'); if (al) a.push('aria=' + al.slice(0,20));
+				const ce = el.getAttribute('contenteditable'); if (ce) a.push('ce=' + ce);
+				return el.tagName.toLowerCase() + a.join('');
+			}
+			function walk(root) {
+				for (const el of root.querySelectorAll('input,textarea,[contenteditable],button[test-id],tp-yt-paper-radio-button,#title-textarea,#description-textarea')) {
+					if (el.offsetParent !== null) hits.push(desc(el));
+				}
+				for (const el of root.querySelectorAll('*')) if (el.shadowRoot) walk(el.shadowRoot);
+			}
+			walk(document);
+			return [...new Set(hits)].slice(0, 40).join(' | ');
+		})()
+	`
+	return chromedp.Evaluate(js, out)
+}
+
+// dumpTextMatches walks all shadow roots and returns tag#id::ownText for every
+// visible element whose own text (direct text nodes) matches re. Diagnostics for
+// finding where a labelled control actually lives in Studio's shadow DOM.
+func dumpTextMatches(re *regexp.Regexp, out *string) chromedp.Action {
+	pat := strings.TrimPrefix(re.String(), "(?i)")
+	js := fmt.Sprintf(`
+		(() => {
+			const re = new RegExp(%q, 'i');
+			const hits = [];
+			function walk(root) {
+				for (const el of root.querySelectorAll('*')) {
+					const own = [...el.childNodes].filter(n => n.nodeType === 3)
+						.map(n => n.textContent).join('').trim();
+					if (own && re.test(own) && el.offsetParent !== null) {
+						const id = el.id ? '#' + el.id : '';
+						hits.push(el.tagName.toLowerCase() + id + '::' + own.slice(0, 30));
+					}
+					if (el.shadowRoot) walk(el.shadowRoot);
+				}
+			}
+			walk(document);
+			return [...new Set(hits)].slice(0, 25).join(' | ');
+		})()
+	`, pat)
 	return chromedp.Evaluate(js, out)
 }
 
