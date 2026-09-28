@@ -42,6 +42,12 @@ type fimavTeams struct {
 	Blue []fimavTeam `json:"blue"`
 }
 
+// fimavScore is the final alliance totals FIM-AV captured from FMS results.
+type fimavScore struct {
+	Red  int `json:"red"`
+	Blue int `json:"blue"`
+}
+
 // fimavRecord is the subset of a match record the uploader reads. It is loaded
 // from the database's FIM-AV-owned columns (db.go: fimavRecord).
 type fimavRecord struct {
@@ -52,6 +58,7 @@ type fimavRecord struct {
 	Status     string           `json:"status"`  // recording | recorded | error
 	HasCard    bool             `json:"hasCard"`
 	Teams      *fimavTeams      `json:"teams,omitempty"`
+	Score      *fimavScore      `json:"score,omitempty"`
 	Processing *fimavProcessing `json:"processing,omitempty"`
 }
 

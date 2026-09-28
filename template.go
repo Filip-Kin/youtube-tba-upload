@@ -8,7 +8,7 @@ import (
 
 const (
 	defaultTitleTemplate       = "{video_prefix} {match_level} Match {match_number}{play_suffix}"
-	defaultDescriptionTemplate = "{title}\n\nRed Alliance:\n- {red[0].number} {red[0].name}\n- {red[1].number} {red[1].name}\n- {red[2].number} {red[2].name}\n\nBlue Alliance:\n- {blue[0].number} {blue[0].name}\n- {blue[1].number} {blue[1].name}\n- {blue[2].number} {blue[2].name}"
+	defaultDescriptionTemplate = "{title}\n\nFinal Score: Red {red_score} - Blue {blue_score}\n\nRed Alliance:\n- {red[0].number} {red[0].name}\n- {red[1].number} {red[1].name}\n- {red[2].number} {red[2].name}\n\nBlue Alliance:\n- {blue[0].number} {blue[0].name}\n- {blue[1].number} {blue[1].name}\n- {blue[2].number} {blue[2].name}"
 )
 
 // templateContext is everything available to a template render.
@@ -23,6 +23,12 @@ type templateContext struct {
 	PlaySuffix  string
 	Title       string // populated for description template after rendering title
 	Alliances   map[string][]allianceTeam
+	// RedScore/BlueScore are the final alliance totals; HasScore is false when no
+	// score was recorded, which drops any line (and so the score block) that uses
+	// them. Kept separate from a zero check because 0 is a valid score.
+	RedScore  int
+	BlueScore int
+	HasScore  bool
 }
 
 var placeholderRe = regexp.MustCompile(`\{([a-zA-Z_]+(?:\[\d+\]\.[a-zA-Z_]+)?)\}`)
@@ -74,6 +80,10 @@ func (c *templateContext) resolvePlaceholder(name string) (string, bool) {
 		return strconv.Itoa(c.MatchNumber), c.MatchNumber != 0
 	case "match_label":
 		return c.MatchLabel, c.MatchLabel != ""
+	case "red_score":
+		return strconv.Itoa(c.RedScore), c.HasScore
+	case "blue_score":
+		return strconv.Itoa(c.BlueScore), c.HasScore
 	case "play":
 		return strconv.Itoa(c.Play), c.Play != 0
 	case "play_suffix":

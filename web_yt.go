@@ -204,6 +204,9 @@ func runBackfill(m *uploadManager, profile ytstudio.Profile, playlistName string
 			if al := alliancesForFile(m.store, it.Filename); len(al) > 0 {
 				ctx.Alliances = al
 			}
+			if r, b, ok := scoreForFile(m.store, it.Filename); ok {
+				ctx.RedScore, ctx.BlueScore, ctx.HasScore = r, b, true
+			}
 			ctx.Title = renderTitle(cfg.TitleTemplate, ctx)
 			description = renderDescription(cfg.DescriptionTemplate, ctx)
 		}

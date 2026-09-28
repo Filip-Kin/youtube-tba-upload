@@ -152,3 +152,13 @@ func alliancesForFile(store *stateStore, filename string) map[string][]allianceT
 	}
 	return al
 }
+
+// scoreForFile returns the final alliance totals FIM-AV captured for a recording,
+// or ok=false when none were recorded (older records, or FMS gave no score).
+func scoreForFile(store *stateStore, filename string) (red, blue int, ok bool) {
+	rec, found := store.fimavRecord(filename)
+	if !found || rec.Score == nil {
+		return 0, 0, false
+	}
+	return rec.Score.Red, rec.Score.Blue, true
+}

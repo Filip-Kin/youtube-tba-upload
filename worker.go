@@ -476,6 +476,9 @@ func (m *uploadManager) pickNext() (pendingUpload, bool) {
 	if al := alliancesForFile(m.store, pick.filename); len(al) > 0 {
 		ctx.Alliances = al
 	}
+	if r, b, ok := scoreForFile(m.store, pick.filename); ok {
+		ctx.RedScore, ctx.BlueScore, ctx.HasScore = r, b, true
+	}
 	title := renderTitle(st.Config.TitleTemplate, ctx)
 	if strings.TrimSpace(title) == "" {
 		// Defensive: never push an empty title to YT.

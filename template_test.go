@@ -75,6 +75,30 @@ func TestRenderDescriptionDropsUndefinedLines(t *testing.T) {
 	}
 }
 
+func TestRenderDescriptionScore(t *testing.T) {
+	p, _ := parseFilename("2026 X Qualification Match 5.mp4")
+
+	// Score present: the Final Score line renders (0 is a valid score).
+	ctx := buildTemplateContext(p, nil, eventConfig{})
+	ctx.Title = "TITLE"
+	ctx.RedScore, ctx.BlueScore, ctx.HasScore = 88, 0, true
+	got := renderDescription(defaultDescriptionTemplate, ctx)
+	if !strings.Contains(got, "Final Score: Red 88 - Blue 0") {
+		t.Errorf("missing score line: %q", got)
+	}
+
+	// No score: the whole Final Score block drops, no stray placeholders.
+	ctx2 := buildTemplateContext(p, nil, eventConfig{})
+	ctx2.Title = "TITLE"
+	got2 := renderDescription(defaultDescriptionTemplate, ctx2)
+	if strings.Contains(got2, "Final Score") {
+		t.Errorf("score block should drop with no score: %q", got2)
+	}
+	if strings.Contains(got2, "{") {
+		t.Errorf("unresolved placeholder: %q", got2)
+	}
+}
+
 func TestPartialAlliance(t *testing.T) {
 	// Only two teams on red; third row should drop, others kept.
 	tmpl := "{red[0].number}\n{red[1].number}\n{red[2].number}"

@@ -75,6 +75,7 @@ type typedMatch struct {
 	Status      string           `json:"status"`
 	HasCard     bool             `json:"hasCard"`
 	Teams       *fimavTeams      `json:"teams,omitempty"`
+	Score       *fimavScore      `json:"score,omitempty"`
 	Processing  *fimavProcessing `json:"processing,omitempty"`
 	Upload      *videoEntry      `json:"upload,omitempty"`
 }
@@ -290,6 +291,7 @@ func (s *stateStore) fimavRecord(filename string) (fimavRecord, bool) {
 		Status:     m.Status,
 		HasCard:    m.HasCard,
 		Teams:      m.Teams,
+		Score:      m.Score,
 		Processing: m.Processing,
 	}, true
 }
