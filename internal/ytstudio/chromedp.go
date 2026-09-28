@@ -621,6 +621,59 @@ func (d *ChromedpDriver) Login(ctx context.Context, p Profile) (string, error) {
 	}
 }
 
+// OpenChannel opens (or reuses) a headed window on the tool profile, points it
+// at YouTube Studio, and leaves it open for the operator — handy when a stream
+// runs off the same machine and should share this one YouTube login. It shares
+// the tool profile, so a later headless upload will close this window to reclaim
+// the profile: Chrome allows only one instance per user-data-dir.
+//
+// It navigates the browser's primary tab (not a child tab), so there is one
+// window with one tab and no leftover about:blank, and it does not tear the
+// session down on return, so the window stays up.
+func (d *ChromedpDriver) OpenChannel(ctx context.Context, p Profile) error {
+	p.Headless = false
+	d.opMu.Lock()
+	defer d.opMu.Unlock()
+
+	d.mu.Lock()
+	key := profileKey(p)
+	if d.browserCtx == nil || d.sessionKey != key || d.browserCtx.Err() != nil {
+		// No usable headed session: drop any other session and open a fresh one.
+		d.closeSessionLocked()
+		session := p
+		exe, err := d.browserFor(ctx, session)
+		if err != nil {
+			d.mu.Unlock()
+			return err
+		}
+		session.Exe = exe
+		allocCtx, cancelAlloc, err := d.allocate(context.Background(), session, false)
+		if err != nil {
+			d.mu.Unlock()
+			return err
+		}
+		browserCtx, cancelBrowser := chromedp.NewContext(allocCtx)
+		if err := chromedp.Run(browserCtx); err != nil {
+			cancelBrowser()
+			cancelAlloc()
+			d.mu.Unlock()
+			return wrapLiveErr(p, p.DebugPort, err)
+		}
+		d.sessionKey = key
+		d.allocCancel = cancelAlloc
+		d.browserCtx = browserCtx
+		d.browserCancel = cancelBrowser
+		d.logf("open-channel: headed window open (%s)", key)
+	}
+	browserCtx := d.browserCtx
+	d.mu.Unlock()
+
+	return chromedp.Run(browserCtx,
+		applyStealth(),
+		chromedp.Navigate("https://studio.youtube.com"),
+	)
+}
+
 // CheckChannel opens YT Studio headlessly and reads the channel name. Returns
 // ErrSessionExpired when the profile no longer has a session.
 func (d *ChromedpDriver) CheckChannel(ctx context.Context, p Profile) (string, error) {

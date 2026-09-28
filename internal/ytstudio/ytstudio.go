@@ -123,6 +123,11 @@ type Driver interface {
 	// deadline passed. Not needed for a live profile, which is already signed in.
 	Login(ctx context.Context, profile Profile) (string, error)
 
+	// OpenChannel opens (or reuses) a headed window on the profile pointed at
+	// YouTube Studio and leaves it open for the operator. Shares the profile, so
+	// a later headless upload will close it to reclaim the user-data-dir.
+	OpenChannel(ctx context.Context, profile Profile) error
+
 	// ListPlaylists returns the channel's playlists (id + title) by scraping the
 	// Studio playlists page, plus the resolved channel id. Passing a known
 	// channelID skips the studio.youtube.com redirect and goes straight to the

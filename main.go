@@ -169,6 +169,7 @@ func main() {
 	// /api/upload/login is the tab-facing alias for the sign-in flow (opens a
 	// headed browser for the operator to log into YouTube).
 	handle(http.MethodPost, "/api/upload/login", apiUploadProfileLogin)
+	handle(http.MethodPost, "/api/upload/open-channel", apiUploadOpenChannel)
 	handle(http.MethodPost, "/api/upload/logout", apiUploadLogout)
 	handle(http.MethodGet, "/api/upload/profile/check", apiUploadProfileCheck)
 	// POST sets, DELETE clears.
@@ -813,6 +814,25 @@ func apiUploadProfileLogin(w http.ResponseWriter, r *http.Request) {
 			return // operator closed the window without signing in
 		}
 		afterLogin(p, name)
+	}(profile)
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+// apiUploadOpenChannel opens a headed window on the tool profile at YouTube
+// Studio and leaves it open for the operator (e.g. to share the login with a
+// stream on the same machine). Fire-and-forget: the window stays up until the
+// operator closes it or an upload reclaims the profile.
+func apiUploadOpenChannel(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		ProfileName string `json:"profile_name"`
+		EventKey    string `json:"event_key"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	profile := profileForRequest(body.EventKey, body.ProfileName)
+	go func(p ytstudio.Profile) {
+		if err := driver.OpenChannel(context.Background(), p); err != nil {
+			log.Printf("open-channel (%s): %v", p.Label(), err)
+		}
 	}(profile)
 	writeJSON(w, map[string]bool{"ok": true})
 }
