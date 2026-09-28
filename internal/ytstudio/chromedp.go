@@ -33,6 +33,14 @@ type ChromedpDriver struct {
 	Managed *ManagedBrowser
 	Verbose bool
 
+	// opMu serializes whole browser operations (from opening a tab to closing
+	// it). Chrome locks a profile's user-data-dir, so an upload and a sign-in
+	// racing on the same profile leaves half-dead Chromes holding the lock
+	// ("Opening in existing browser session") and the profile jammed. One
+	// operation at a time keeps the profile clean. tab() acquires it; the close
+	// func the caller defers releases it.
+	opMu sync.Mutex
+
 	// One browser stays open for the whole session and each operation gets a
 	// tab in it. Starting Chrome, loading a profile and getting Studio warm
 	// again costs more than every other step of an upload put together, and at
@@ -272,7 +280,17 @@ func profileKey(p Profile) string {
 // The browser is started on first use and reused until it dies or a different
 // profile is asked for. It deliberately does not hang off the caller's context,
 // which ends with the upload.
-func (d *ChromedpDriver) tab(ctx context.Context, p Profile) (context.Context, context.CancelFunc, error) {
+func (d *ChromedpDriver) tab(ctx context.Context, p Profile) (_ context.Context, _ context.CancelFunc, err error) {
+	// Serialize the whole operation on the profile. Held until the caller runs
+	// the close func this returns; released here if we fail before returning it.
+	d.opMu.Lock()
+	release := d.opMu.Unlock
+	defer func() {
+		if release != nil {
+			release()
+		}
+	}()
+
 	d.mu.Lock()
 	key := profileKey(p)
 	if d.browserCtx != nil && (d.sessionKey != key || d.browserCtx.Err() != nil) {
@@ -356,9 +374,11 @@ func (d *ChromedpDriver) tab(ctx context.Context, p Profile) (context.Context, c
 		case <-tabCtx.Done():
 		}
 	}()
+	release = nil // ownership of opMu passes to the close func
 	return tabCtx, func() {
 		close(done)
 		cancelTab()
+		d.opMu.Unlock()
 	}, nil
 }
 
@@ -379,6 +399,10 @@ func (d *ChromedpDriver) closeSessionLocked() {
 // Close shuts the browser down. Called when the helper exits; without it the
 // browser outlives the process on Windows.
 func (d *ChromedpDriver) Close() {
+	// Wait for any in-flight operation so we don't cancel a browser mid-upload
+	// or mid-sign-in. Same lock order as tab(): opMu before mu.
+	d.opMu.Lock()
+	defer d.opMu.Unlock()
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.browserCtx != nil {

@@ -269,6 +269,17 @@ func getOrCreateManager(eventKey string) (*uploadManager, error) {
 	return m, nil
 }
 
+// resumeAllManagers clears the "needs sign-in" flag on every event and wakes
+// its upload loop. Called after a successful sign-in or channel check so uploads
+// that stopped for re-auth pick back up without waiting for the next scan.
+func resumeAllManagers() {
+	managersMu.Lock()
+	defer managersMu.Unlock()
+	for _, m := range managers {
+		m.resetSessionFlag()
+	}
+}
+
 // closeAllManagers stops the upload loops and closes each event's database so
 // the WAL is checkpointed on a clean shutdown.
 func closeAllManagers() {
@@ -785,7 +796,9 @@ func apiUploadProfileLogin(w http.ResponseWriter, r *http.Request) {
 	go func(p ytstudio.Profile) {
 		if err := driver.Login(context.Background(), p); err != nil {
 			log.Printf("login (%s): %v", p.Label(), err)
+			return
 		}
+		afterLogin(p)
 	}(profile)
 	writeJSON(w, map[string]bool{"ok": true})
 }
@@ -799,6 +812,7 @@ func apiUploadProfileCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	setSignIn(signInState{SignedIn: true, ChannelName: name})
+	resumeAllManagers()
 	writeJSON(w, map[string]string{"channel_name": name})
 }
 

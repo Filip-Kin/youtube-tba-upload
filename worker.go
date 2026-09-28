@@ -251,6 +251,14 @@ func (m *uploadManager) uploadLoop() {
 // in-flight upload at a time by design — YT Studio doesn't like concurrent
 // browser sessions per profile.
 func (m *uploadManager) uploadOne() {
+	// Never launch the browser before the operator is signed in, and stop once a
+	// session has expired. A signed-out profile can't upload, and retrying only
+	// spawns Chrome instances that pile up and jam the profile so the sign-in
+	// window itself can't open (seen live at 2026miwyo). A sign-in or channel
+	// check clears NeedsReauth and nudges the loop.
+	if !getSignIn().SignedIn || m.store.snapshot().NeedsReauth {
+		return
+	}
 	target, ok := m.pickNext()
 	if !ok {
 		return
