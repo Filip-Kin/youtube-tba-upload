@@ -1814,15 +1814,27 @@ func attachFileViaChooser(ctx context.Context, filePath string, logf func(string
 	logf("step 2: Create matched %s", createInfo)
 
 	logf("step 2: shadow-pierce click Upload videos")
+	uploadMenuSelectors := []string{"tp-yt-paper-item", "ytcp-text-menu-item", "[role=menuitem]", "yt-formatted-string"}
 	var uploadInfo string
-	if err := chromedp.Run(ctx,
-		shadowClickByText(
-			[]string{"tp-yt-paper-item", "ytcp-text-menu-item", "[role=menuitem]"},
-			regexp.MustCompile(`(?i)^upload\s*videos?$`),
+	uploadDeadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(uploadDeadline) {
+		// Substring (not anchored): the item's textContent may carry an icon or
+		// extra whitespace around "Upload videos"/"Upload video".
+		_ = chromedp.Run(ctx, shadowClickByText(
+			uploadMenuSelectors,
+			regexp.MustCompile(`(?i)upload\s*videos?`),
 			&uploadInfo,
-		),
-	); err != nil {
-		return fmt.Errorf("click upload-videos menu item: %w", err)
+		))
+		if uploadInfo != "" {
+			break
+		}
+		_ = chromedp.Run(ctx, chromedp.Sleep(400*time.Millisecond))
+	}
+	if uploadInfo == "" {
+		var menu string
+		_ = chromedp.Run(ctx, dumpVisibleText(uploadMenuSelectors, &menu))
+		logf("step 2: Create menu items seen: %s", menu)
+		return errors.New("could not find Upload videos menu item")
 	}
 	logf("step 2: Upload-videos matched %s", uploadInfo)
 
@@ -1833,24 +1845,30 @@ func attachFileViaChooser(ctx context.Context, filePath string, logf func(string
 	// in JS is ignored. So we shadow-walk to find the button's screen
 	// coordinates, then issue a real CDP mouse click there.
 	logf("step 2: locate SELECT FILES button")
+	selectFilesSelectors := []string{"ytcp-button#select-files-button", "ytcp-button", "button", "[role=button]"}
 	var sx, sy float64
 	var selectInfo string
-	if err := chromedp.Run(ctx,
-		chromedp.Sleep(1*time.Second),
-		shadowLocateByText(
-			[]string{"ytcp-button#select-files-button", "ytcp-button", "button", "[role=button]"},
-			// pit-podcast: r"select file|choose file" — match either phrasing,
-			// substring (not anchored), because the rendered text may wrap.
+	selectDeadline := time.Now().Add(12 * time.Second)
+	for time.Now().Before(selectDeadline) {
+		// pit-podcast: r"select file|choose file" — either phrasing, substring
+		// (not anchored), because the rendered text may wrap.
+		_ = chromedp.Run(ctx, shadowLocateByText(
+			selectFilesSelectors,
 			regexp.MustCompile(`(?i)select\s*files?|choose\s*files?`),
 			&sx, &sy, &selectInfo,
-		),
-	); err != nil {
-		return fmt.Errorf("locate select-files: %w", err)
+		))
+		if selectInfo != "" {
+			break
+		}
+		_ = chromedp.Run(ctx, chromedp.Sleep(400*time.Millisecond))
 	}
-	logf("step 2: SELECT FILES at (%.0f,%.0f) %s", sx, sy, selectInfo)
 	if selectInfo == "" {
+		var btns string
+		_ = chromedp.Run(ctx, dumpVisibleText([]string{"ytcp-button", "button", "[role=button]"}, &btns))
+		logf("step 2: buttons seen: %s", btns)
 		return errors.New("could not find SELECT FILES button")
 	}
+	logf("step 2: SELECT FILES at (%.0f,%.0f) %s", sx, sy, selectInfo)
 	if err := chromedp.Run(ctx,
 		humanSleep(250*time.Millisecond, 600*time.Millisecond),
 		humanClick(sx, sy),
@@ -2306,6 +2324,38 @@ func shadowClickByText(tagSelectors []string, re *regexp.Regexp, info *string) c
 		})()
 	`, pat, selArr)
 	return chromedp.Evaluate(js, info)
+}
+
+// dumpVisibleText walks all shadow roots and collects the trimmed text of every
+// visible element matching the given selectors, for diagnostics when a
+// text-based match fails (so the log shows what was actually on the page).
+func dumpVisibleText(selectors []string, out *string) chromedp.Action {
+	parts := make([]string, len(selectors))
+	for i, s := range selectors {
+		parts[i] = fmt.Sprintf("%q", s)
+	}
+	selArr := "[" + strings.Join(parts, ",") + "]"
+	js := fmt.Sprintf(`
+		(() => {
+			const sels = %s;
+			const seen = new Set();
+			function walk(root) {
+				for (const sel of sels) {
+					for (const el of root.querySelectorAll(sel)) {
+						if (el.offsetParent === null) continue;
+						const t = (el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 40);
+						if (t) seen.add(t);
+					}
+				}
+				for (const el of root.querySelectorAll('*')) {
+					if (el.shadowRoot) walk(el.shadowRoot);
+				}
+			}
+			walk(document);
+			return [...seen].slice(0, 30).join(' | ');
+		})()
+	`, selArr)
+	return chromedp.Evaluate(js, out)
 }
 
 // waitForVisibleInput polls until selector matches a visible element. The
