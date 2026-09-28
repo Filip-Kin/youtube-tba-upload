@@ -43,10 +43,14 @@ const uploaderStateFileName = "youtube-tba-upload.json"
 func uploaderStatePath() string { return filepath.Join(settings.VideoDir, uploaderStateFileName) }
 
 type uploaderState struct {
-	Config          eventConfig       `json:"config"`
-	ManualVideoIDs  map[string]string `json:"manual_video_ids,omitempty"`
-	NeedsReauth     bool              `json:"needs_reauth,omitempty"`
-	LastChannelName string            `json:"last_channel_name,omitempty"`
+	Config         eventConfig       `json:"config"`
+	ManualVideoIDs map[string]string `json:"manual_video_ids,omitempty"`
+	NeedsReauth    bool              `json:"needs_reauth,omitempty"`
+	// UnmatchedUploads is the upload state of videos with no FIM-AV record
+	// (hand-placed files). It lives here, not in the shared manifest: a record
+	// there without FIM-AV's own fields (status/id) crashes FIM-AV's renderer.
+	UnmatchedUploads map[string]*videoEntry `json:"unmatched_uploads,omitempty"`
+	LastChannelName  string                 `json:"last_channel_name,omitempty"`
 }
 
 // rawManifest preserves every match record verbatim (as raw JSON objects) so a
@@ -154,6 +158,18 @@ func (s *stateStore) load() error {
 			}
 			s.state.NeedsReauth = ss.NeedsReauth
 			s.state.LastChannelName = ss.LastChannelName
+			// Hand-placed videos with no FIM-AV record live here, not in the
+			// shared manifest. The manifest wins if the file later got a record.
+			for name, e := range ss.UnmatchedUploads {
+				if e == nil {
+					continue
+				}
+				if _, ok := s.state.Videos[name]; !ok {
+					cp := *e
+					cp.Meta = nil
+					s.state.Videos[name] = &cp
+				}
+			}
 		}
 	}
 	return nil
@@ -184,75 +200,78 @@ func (s *stateStore) update(fn func(*eventState)) error {
 // s.mu (the in-process lock); the .lock file guards against FIM-AV writing at
 // the same instant.
 func (s *stateStore) persistLocked() error {
-	// Settings -> the uploader-private file (atomic; no shared lock needed, only
-	// this process writes it).
+	// Videos split two ways: those with a FIM-AV record get their upload object
+	// written into that record in the shared manifest; those without (hand-placed
+	// files) are kept in our private state file. Never inject a record into the
+	// shared manifest without FIM-AV's own fields — status/id absent there blanks
+	// FIM-AV's Auto AV table.
+	unmatched := map[string]*videoEntry{}
+
+	if len(s.state.Videos) > 0 {
+		release, err := acquireManifestLock()
+		if err != nil {
+			return err
+		}
+		defer release()
+
+		raw, err := readRawManifest()
+		if err != nil {
+			return err
+		}
+		if raw.Version == 0 {
+			raw.Version = 1
+		}
+
+		// Index existing records by fileName.
+		idx := map[string]int{}
+		for i, rec := range raw.Matches {
+			if fn := rawString(rec, "fileName"); fn != "" {
+				idx[fn] = i
+			}
+		}
+
+		wrote := false
+		for name, e := range s.state.Videos {
+			cp := *e
+			cp.Meta = nil
+			i, ok := idx[name]
+			if !ok {
+				unmatched[name] = &cp
+				continue
+			}
+			ub, err := json.Marshal(&cp)
+			if err != nil {
+				return fmt.Errorf("marshal upload %s: %w", name, err)
+			}
+			raw.Matches[i]["upload"] = json.RawMessage(ub)
+			wrote = true
+		}
+
+		// Only touch the shared manifest when a real record took an upload object.
+		if wrote {
+			out, err := json.MarshalIndent(raw, "", "  ")
+			if err != nil {
+				return err
+			}
+			if err := writeFileAtomic(manifestPath(), out); err != nil {
+				return err
+			}
+		}
+	}
+
+	// Settings + unmatched uploads -> the uploader-private file (atomic; no shared
+	// lock needed, only this process writes it).
 	ss := uploaderState{
-		Config:          s.state.Config,
-		ManualVideoIDs:  s.state.ManualVideoIDs,
-		NeedsReauth:     s.state.NeedsReauth,
-		LastChannelName: s.state.LastChannelName,
+		Config:           s.state.Config,
+		ManualVideoIDs:   s.state.ManualVideoIDs,
+		NeedsReauth:      s.state.NeedsReauth,
+		LastChannelName:  s.state.LastChannelName,
+		UnmatchedUploads: unmatched,
 	}
 	if b, err := json.MarshalIndent(ss, "", "  "); err == nil {
 		_ = writeFileAtomic(uploaderStatePath(), b)
 	}
-
-	if len(s.state.Videos) == 0 {
-		return nil
-	}
-	release, err := acquireManifestLock()
-	if err != nil {
-		return err
-	}
-	defer release()
-
-	raw, err := readRawManifest()
-	if err != nil {
-		return err
-	}
-	if raw.Version == 0 {
-		raw.Version = 1
-	}
-
-	// Index existing records by fileName.
-	idx := map[string]int{}
-	for i, rec := range raw.Matches {
-		if fn := rawString(rec, "fileName"); fn != "" {
-			idx[fn] = i
-		}
-	}
-
-	for name, e := range s.state.Videos {
-		cp := *e
-		cp.Meta = nil
-		ub, err := json.Marshal(&cp)
-		if err != nil {
-			return fmt.Errorf("marshal upload %s: %w", name, err)
-		}
-		if i, ok := idx[name]; ok {
-			raw.Matches[i]["upload"] = json.RawMessage(ub)
-			continue
-		}
-		// No FIM-AV record yet (e.g. a hand-placed file). Add a minimal record
-		// carrying our identity so the file is tracked; FIM-AV fills the rest if
-		// it ever records it.
-		rec := map[string]json.RawMessage{
-			"fileName": jsonRaw(name),
-			"upload":   json.RawMessage(ub),
-		}
-		if e.Meta != nil {
-			rec["level"] = jsonRaw(e.Meta.MatchLevel)
-			rec["matchNumber"] = jsonRaw(e.Meta.MatchNumber)
-			rec["playNumber"] = jsonRaw(e.Meta.Play)
-		}
-		raw.Matches = append(raw.Matches, rec)
-		idx[name] = len(raw.Matches) - 1
-	}
-
-	out, err := json.MarshalIndent(raw, "", "  ")
-	if err != nil {
-		return err
-	}
-	return writeFileAtomic(manifestPath(), out)
+	return nil
 }
 
 // fimavRecord returns the FIM-AV-owned fields for one file, from the manifest

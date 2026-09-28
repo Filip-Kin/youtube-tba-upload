@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestStateStoreRoundtrip(t *testing.T) {
@@ -46,9 +47,56 @@ func TestStateStoreRoundtrip(t *testing.T) {
 		t.Errorf("manual ids not persisted: %+v", got.ManualVideoIDs)
 	}
 
-	// The shared manifest should exist beside the recordings.
-	if _, err := os.Stat(filepath.Join(videoDir, manifestFileName)); err != nil {
-		t.Errorf("manifest missing: %v", err)
+	// foo.mp4 has no FIM-AV record, so its upload state persists in the
+	// uploader-private file and NOT as a skeleton record in the shared manifest
+	// (a record without FIM-AV's status/id blanks its Auto AV table).
+	if _, err := os.Stat(filepath.Join(videoDir, uploaderStateFileName)); err != nil {
+		t.Errorf("uploader state file missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(videoDir, manifestFileName)); err == nil {
+		doc, err := readTypedManifest()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, m := range doc.Matches {
+			if m.FileName == "foo.mp4" {
+				t.Errorf("unmatched video injected a skeleton manifest record: %+v", m)
+			}
+		}
+	}
+}
+
+// A video that DOES have a FIM-AV record gets its upload object written into
+// that record in the shared manifest, and it round-trips from there.
+func TestMatchedVideoWritesUploadToManifest(t *testing.T) {
+	dir := t.TempDir()
+	s := openStoreFor(t, dir)
+	writeFimavRec(t, s, recorded("QM5_MIKET.mp4", time.Hour))
+
+	if err := s.update(func(es *eventState) {
+		es.Videos["QM5_MIKET.mp4"] = &videoEntry{Status: statusUploaded, YTVideoID: "vid12345678"}
+	}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+
+	doc, err := readTypedManifest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, m := range doc.Matches {
+		if m.FileName == "QM5_MIKET.mp4" {
+			found = true
+			if m.Status != "recorded" {
+				t.Errorf("FIM-AV status clobbered: %q", m.Status)
+			}
+			if m.Upload == nil || m.Upload.YTVideoID != "vid12345678" {
+				t.Errorf("upload object not written: %+v", m.Upload)
+			}
+		}
+	}
+	if !found {
+		t.Error("record vanished from manifest")
 	}
 }
 
