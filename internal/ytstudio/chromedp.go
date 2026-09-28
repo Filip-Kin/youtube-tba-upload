@@ -9,6 +9,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -65,6 +66,27 @@ func NewChromedpDriver(profileRoot, browserRoot, browserExe string) *ChromedpDri
 		}}
 	}
 	return d
+}
+
+// KillStaleBrowsers terminates managed-browser processes left over from a
+// previous run. The uploader exe restarts across app launches (and on the
+// Restart button) and loses the handles to the Chrome instances it spawned;
+// those orphans keep holding the profile's user-data-dir, so every new launch is
+// forwarded to a dead instance and fails ("chrome failed to start", no window).
+// Only chrome.exe processes whose command line points at OUR profiles directory
+// are killed, never the operator's own Chrome. Call once at startup, before
+// opening any browser. Windows only — the managed browser is Windows-only here.
+func (d *ChromedpDriver) KillStaleBrowsers() {
+	if runtime.GOOS != "windows" || d.ProfileRoot == "" {
+		return
+	}
+	root := strings.ReplaceAll(d.ProfileRoot, "'", "''")
+	ps := "Get-CimInstance Win32_Process | " +
+		"Where-Object { $_.Name -eq 'chrome.exe' -and $_.CommandLine -like '*" + root + "*' } | " +
+		"ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+	if err := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", ps).Run(); err != nil {
+		d.logf("kill stale browsers: %v", err)
+	}
 }
 
 func (d *ChromedpDriver) logf(format string, args ...any) {

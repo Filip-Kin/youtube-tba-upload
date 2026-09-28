@@ -93,6 +93,11 @@ func main() {
 	d.Verbose = true
 	driver = d
 
+	// Kill any managed Chrome left over from a previous uploader process. Those
+	// orphans hold the profile's user-data-dir, so a fresh launch is forwarded to
+	// a dead instance and never opens a window.
+	d.KillStaleBrowsers()
+
 	// Fetch the browser now rather than in the middle of the first match, so
 	// the first upload of the day isn't waiting on a download.
 	go func() {
