@@ -13,8 +13,8 @@ import (
 
 // The channel's playlists are cached on disk so the dropdown survives restarts
 // and the upload/backfill paths can resolve a playlist_id -> title WITHOUT
-// launching Chrome every time. The channel id is cached too, so a refresh skips
-// the studio.youtube.com redirect and goes straight to the playlists page.
+// launching Chrome every time. The channel id is stored for reference only; a
+// refresh always resolves it fresh (see refreshPlaylists).
 type ytPlaylistCache struct {
 	ChannelID string              `json:"channel_id"`
 	Playlists []ytstudio.Playlist `json:"playlists"`
@@ -56,19 +56,18 @@ func clearPlaylistCache() {
 	_ = os.Remove(playlistCachePath())
 }
 
-// refreshPlaylists scrapes the channel (reusing the cached channel id to skip
-// the redirect) and persists the result. Returns the fresh list.
+// refreshPlaylists scrapes the signed-in channel and persists the result.
+// Returns the fresh list. It always resolves the channel id from the
+// studio.youtube.com redirect rather than the cache: a cached id can belong to
+// an account that is no longer signed in, and the redirect costs a few seconds
+// on a refresh that runs rarely.
 func refreshPlaylists(ctx context.Context, profile ytstudio.Profile) ([]ytstudio.Playlist, error) {
-	cache := loadPlaylistCache()
-	pls, channelID, err := driver.ListPlaylists(ctx, profile, cache.ChannelID)
+	pls, channelID, err := driver.ListPlaylists(ctx, profile, "")
 	if err != nil {
 		return nil, err
 	}
 	if pls == nil {
 		pls = []ytstudio.Playlist{}
-	}
-	if channelID == "" {
-		channelID = cache.ChannelID
 	}
 	savePlaylistCache(ytPlaylistCache{ChannelID: channelID, Playlists: pls})
 	return pls, nil
