@@ -173,6 +173,20 @@ func (s *stateStore) load() error {
 			}
 		}
 	}
+	// An entry still marked uploading was cut off by a crash or restart; no
+	// upload is running at load time. Put it back in the queue as a failed
+	// attempt so it retries with the normal backoff and attempt cap.
+	for _, e := range s.state.Videos {
+		if e.Status == statusUploading {
+			e.Status = statusStable
+			e.Attempts++
+			e.NextAttempt = 0
+			e.LastError = "upload interrupted"
+			if e.Attempts >= maxAttempts {
+				e.Status = statusFailed
+			}
+		}
+	}
 	return nil
 }
 

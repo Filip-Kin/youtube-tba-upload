@@ -72,6 +72,7 @@ func verifyChannelOnBoot() {
 func afterLogin(profile ytstudio.Profile, channelName string) {
 	setSignIn(signInState{SignedIn: true, ChannelName: channelName})
 	log.Printf("after login: signed in as %q", channelName)
+	clearPlaylistCache()
 	if _, err := refreshPlaylists(context.Background(), profile); err != nil {
 		log.Printf("after login: playlist prefetch failed: %v", err)
 	}
@@ -101,6 +102,7 @@ func apiUploadLogout(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "remove profile: "+err.Error())
 		return
 	}
+	clearPlaylistCache()
 	setSignIn(signInState{SignedIn: false})
 	log.Printf("logout: removed profile %q", profile.Name)
 	writeJSON(w, map[string]bool{"ok": true})

@@ -276,3 +276,29 @@ func TestScanFlagsChangeAfterUpload(t *testing.T) {
 		t.Error("changed_after_upload not set; the raw video is on YouTube silently")
 	}
 }
+
+// An entry left "uploading" by a crash or restart goes back in the queue on
+// load, counted as one failed attempt.
+func TestLoadRequeuesInterruptedUpload(t *testing.T) {
+	dir := t.TempDir()
+	ss := uploaderState{
+		Config: eventConfig{EventKey: "2026test"},
+		UnmatchedUploads: map[string]*videoEntry{
+			"a.mp4": {Status: statusUploading, Attempts: 1, NextAttempt: 99},
+			"b.mp4": {Status: statusUploading, Attempts: maxAttempts - 1},
+		},
+	}
+	data, _ := json.Marshal(ss)
+	if err := os.WriteFile(filepath.Join(dir, uploaderStateFileName), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := openStoreFor(t, dir)
+	st := s.snapshot()
+	a, b := st.Videos["a.mp4"], st.Videos["b.mp4"]
+	if a.Status != statusStable || a.Attempts != 2 || a.NextAttempt != 0 || a.LastError == "" {
+		t.Fatalf("a: %+v", a)
+	}
+	if b.Status != statusFailed {
+		t.Fatalf("b: %+v", b)
+	}
+}

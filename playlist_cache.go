@@ -47,6 +47,15 @@ func savePlaylistCache(c ytPlaylistCache) {
 	}
 }
 
+// clearPlaylistCache drops the cached channel id and playlists. Called on
+// sign-in and sign-out: a new account is a new channel, and a stale channel id
+// would send every playlist lookup to the previous account's channel.
+func clearPlaylistCache() {
+	plCacheMu.Lock()
+	defer plCacheMu.Unlock()
+	_ = os.Remove(playlistCachePath())
+}
+
 // refreshPlaylists scrapes the channel (reusing the cached channel id to skip
 // the redirect) and persists the result. Returns the fresh list.
 func refreshPlaylists(ctx context.Context, profile ytstudio.Profile) ([]ytstudio.Playlist, error) {
