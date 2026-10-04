@@ -116,6 +116,7 @@ func openStateStore(eventKey string) (*stateStore, error) {
 				TitleTemplate:       defaultTitleTemplate,
 				DescriptionTemplate: defaultDescriptionTemplate,
 				AutoSubmitTBA:       true,
+				AutoSubmitTOA:       true,
 				Headless:            true,
 			},
 			Videos:         map[string]*videoEntry{},
@@ -147,6 +148,9 @@ func (s *stateStore) load() error {
 	// Settings (config/kv/manual ids) from the uploader-private file, if present.
 	if data, err := os.ReadFile(uploaderStatePath()); err == nil && len(data) > 0 {
 		var ss uploaderState
+		// A settings file from before TOA support has no auto_submit_toa;
+		// absent means the default, on.
+		ss.Config.AutoSubmitTOA = true
 		if json.Unmarshal(data, &ss) == nil {
 			if ss.Config.ProfileName != "" || ss.Config.EventKey != "" {
 				s.state.Config = ss.Config
@@ -311,6 +315,7 @@ func (s *stateStore) fimavRecord(filename string) (fimavRecord, bool) {
 		EndedAt:    m.EndedAt,
 		Status:     m.Status,
 		HasCard:    m.HasCard,
+		EventCode:  m.EventCode,
 		Teams:      m.Teams,
 		Score:      m.Score,
 		Processing: m.Processing,

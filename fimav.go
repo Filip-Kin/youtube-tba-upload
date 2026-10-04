@@ -57,6 +57,7 @@ type fimavRecord struct {
 	EndedAt    int64            `json:"endedAt"` // epoch ms
 	Status     string           `json:"status"`  // recording | recorded | error
 	HasCard    bool             `json:"hasCard"`
+	EventCode  string           `json:"eventCode,omitempty"` // FMS / FTC Live event code
 	Teams      *fimavTeams      `json:"teams,omitempty"`
 	Score      *fimavScore      `json:"score,omitempty"`
 	Processing *fimavProcessing `json:"processing,omitempty"`

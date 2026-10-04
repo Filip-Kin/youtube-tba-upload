@@ -145,7 +145,11 @@ func (m *uploadManager) scanNow() {
 			// The filename says which match this is, which is what links the
 			// finished upload to TBA. FIM-AV renames its own recordings, so
 			// nothing else fills this in.
-			fillMetaFromFilename(entry, name)
+			if isFTC() {
+				fillFTCMeta(entry, name, s.Config)
+			} else {
+				fillMetaFromFilename(entry, name)
+			}
 
 			// Already-uploaded or skipped entries are immutable from here.
 			// One exception: note when an uploaded file changes underneath us.
@@ -365,7 +369,12 @@ func (m *uploadManager) uploadOne() {
 	// Post the video URL to its TBA match as part of the flow, so the match
 	// page has the video without a second tool or a manual step. Off the store
 	// lock: this makes a network call.
-	m.submitToTBA(target.filename)
+	// At an FTC event the video goes to The Orange Alliance instead.
+	if isFTC() {
+		m.submitToTOA(target.filename)
+	} else {
+		m.submitToTBA(target.filename)
+	}
 	// Immediately try the next one.
 	m.nudge()
 }
@@ -377,6 +386,10 @@ func (m *uploadManager) uploadOne() {
 // practice/test videos have no key, and an event with no TBA creds configured
 // simply isn't submitting.
 func (m *uploadManager) submitToTBA(filename string) {
+	// TBA has no FTC matches; FTC videos go to TOA (submitToTOA).
+	if isFTC() {
+		return
+	}
 	st := m.store.snapshot()
 	cfg := st.Config
 	if !cfg.AutoSubmitTBA {
@@ -506,6 +519,10 @@ func (m *uploadManager) pickNext() (pendingUpload, bool) {
 	}
 	if r, b, ok := scoreForFile(m.store, pick.filename); ok {
 		ctx.RedScore, ctx.BlueScore, ctx.HasScore = r, b, true
+	}
+	// FIM-AV may not have the FTC score or teams; FTC Live does.
+	if isFTC() {
+		fillFromFTCLive(ctx, m.store, pick.filename, pick.parsed)
 	}
 	title := renderTitle(st.Config.TitleTemplate, ctx)
 	if strings.TrimSpace(title) == "" {

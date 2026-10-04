@@ -157,6 +157,20 @@ login/logout/check. The tab shows "signed in as X" or a sign-in prompt from this
 body (all uploaded, key-bearing, not-yet-submitted). 400 if no creds. Results in
 `tba_submitted`/`tba_submit_error` per video.
 
+**TOA submit (FTC)** — with `-program ftc`, the upload flow sets the video URL on
+The Orange Alliance instead of TBA (`PUT {toa-url}/api/match/video`, headers
+`X-Application-Origin` + `X-TOA-Key`). The key needs TOA access level 3 or 4; a
+myTOA account key is level 1 and is refused. Manual/retry:
+`POST /api/yt/submit-toa?event_key=E`, same body and answer as submit-tba. 400 if
+no `toa_api_key`/`toa_event_key`, or if not running as FTC. Results in
+`toa_submitted`/`toa_submit_error`/`toa_match_key` per video.
+
+FTC recording names: `Q3_fimavtest.mp4` (in-season) and
+`2026 FIM AV Test - Qualification Q3.mp4` (off-season); the short name is
+`{match_label}`. Qualification scores and team numbers come from the manifest,
+else from one read of FTC Live `GET {ftc-url}/api/v1/events/{code}/matches/{n}/`
+per match (code from the manifest record's `eventCode`, else the file name).
+
 **Backfill** — `POST /api/yt/backfill?event_key=E` re-applies description +
 playlist over uploaded videos in match order (background). Run only when idle.
 
@@ -183,7 +197,8 @@ Follow FIM-AV Assistant's existing idioms (verified against branch
   `getAssetPath` pattern (`app.isPackaged ? process.resourcesPath/assets :
   __dirname/../../assets`), the same way `HWCheck.ts` resolves SoundVolumeView.
 - **Spawn args**: `-video-dir <current event folder>`, `-listen :8807`,
-  `-fms-url <fms>`, `-tba-url <tba>`. No `shell: true`.
+  `-fms-url <fms>`, `-tba-url <tba>`. At an FTC event add `-program ftc` and
+  `-ftc-url http://<host[:port]>`. No `shell: true`.
 - **Readiness**: after spawn, poll `GET /api/health` with
   `fetch`+`AbortSignal.timeout(...)` (the idiom `register-events.ts` already uses
   to reach the captions uploader) until it answers, then report running.
@@ -220,7 +235,9 @@ Follow FIM-AV Assistant's existing idioms (verified against branch
   "browser_debug_port": 0, "browser_exe": "",
   "cut_wait_seconds": 0,                 // 0=default 120s; <0=don't wait for cut
   "auto_submit_tba": true,               // post URL to TBA after upload
-  "tba_auth_id": "", "tba_secret": ""    // event trusted-API creds
+  "tba_auth_id": "", "tba_secret": "",   // event trusted-API creds
+  "auto_submit_toa": true,               // FTC: set URL on TOA after upload (default on)
+  "toa_api_key": "", "toa_event_key": "" // FTC: TOA key (level 3+), e.g. "2627-FIM-TEST"
 }
 ```
 
@@ -235,7 +252,8 @@ Follow FIM-AV Assistant's existing idioms (verified against branch
   "hold_reason": "", "changed_after_upload": false,
   "meta": { "tba_match_key": "qm5", "match_level": "Qualification",
             "match_number": 5, "match_label": "Qualification 5", "play": 1 },
-  "tba_submitted": false, "tba_submit_error": ""
+  "tba_submitted": false, "tba_submit_error": "",
+  "toa_submitted": false, "toa_submit_error": "", "toa_match_key": ""  // FTC only
 }
 ```
 

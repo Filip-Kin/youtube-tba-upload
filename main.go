@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/Filip-Kin/youtube-tba-upload/internal/ytstudio"
+	"github.com/Filip-Kin/youtube-tba-upload/toa"
 )
 
 // Version is set at build time via -ldflags "-X main.Version=...", the same as
@@ -56,9 +57,19 @@ func main() {
 	flag.StringVar(&settings.VideoDir, "video-dir", defaultVideoDir(), "folder containing recorded videos (FIM-AV's \"{year} {event name}\" folder)")
 	fmsURLFlag := flag.String("fms-url", "http://10.0.100.5", "FMS base URL, used to fill team names the manifest lacks")
 	tbaURLFlag := flag.String("tba-url", "https://www.thebluealliance.com", "TBA base URL for trusted match-video submission")
+	programFlag := flag.String("program", programFRC, "event program: frc (FMS + The Blue Alliance) or ftc (FTC Live + The Orange Alliance)")
+	ftcURLFlag := flag.String("ftc-url", "", "FTC Live scorekeeper base URL (http://host[:port]), used at FTC events for match scores")
+	toaURLFlag := flag.String("toa-url", toa.DefaultURL, "TOA API base URL for match-video submission at FTC events")
 	flag.Parse()
 	fmsURL = *fmsURLFlag
 	tbaURL = *tbaURLFlag
+	ftcURL = strings.TrimRight(*ftcURLFlag, "/")
+	toaURL = *toaURLFlag
+	if p, err := parseProgram(*programFlag); err != nil {
+		log.Fatal(err)
+	} else {
+		program = p
+	}
 
 	// Mirror all logs to a file so there's debug data after the fact, not just
 	// whatever scrolled past in the console window.
@@ -67,6 +78,9 @@ func main() {
 	}
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 	log.Printf("=== autoav-helper start ===")
+	if isFTC() {
+		log.Printf("program ftc: FTC Live %q, TOA %s", ftcURL, toaURL)
+	}
 
 	// The -video-dir flag wins when explicitly given; otherwise a folder saved
 	// on a previous run wins over the default, so the choice survives a restart.
@@ -201,6 +215,7 @@ func main() {
 		writeJSON(w, map[string]any{
 			"status":       "ok",
 			"version":      Version,
+			"program":      program,
 			"video_dir":    settings.VideoDir,
 			"watching":     isEventFolder(settings.VideoDir),
 			"signed_in":    si.SignedIn,
@@ -539,7 +554,9 @@ func apiUploadSaveConfig(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var cfg eventConfig
+	// auto_submit_toa defaults to on when the body leaves it out; decoding
+	// leaves fields the body does not name untouched.
+	cfg := eventConfig{AutoSubmitTOA: true}
 	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return

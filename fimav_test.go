@@ -41,6 +41,8 @@ func writeFimavRec(t *testing.T, _ *stateStore, rec fimavRecord) {
 			doc.Matches[i].EndedAt = rec.EndedAt
 			doc.Matches[i].Teams = rec.Teams
 			doc.Matches[i].Processing = rec.Processing
+			doc.Matches[i].Score = rec.Score
+			doc.Matches[i].EventCode = rec.EventCode
 			found = true
 			break
 		}
@@ -50,6 +52,7 @@ func writeFimavRec(t *testing.T, _ *stateStore, rec fimavRecord) {
 			ID: rec.ID, FileName: rec.FileName, FilePath: rec.FilePath,
 			Status: rec.Status, HasCard: rec.HasCard, EndedAt: rec.EndedAt,
 			Teams: rec.Teams, Processing: rec.Processing,
+			Score: rec.Score, EventCode: rec.EventCode,
 		})
 	}
 	if doc.Version == 0 {

@@ -38,6 +38,9 @@ type parsedFilename struct {
 	Play        int    // 1 if no play/replay marker is present
 	Dedup       int    // 0 if no " - N" suffix
 	Extension   string // e.g. ".mp4"
+	// ShortName is FTC Live's label for the match ("Q3"), present only on FTC
+	// recording names (parse_ftc.go). It is the match label when set.
+	ShortName string
 }
 
 // parseFilename returns the parsed form and true on success, or zero+false if the
@@ -65,6 +68,9 @@ var fimLevels = map[string]string{
 }
 
 func parseFilename(name string) (parsedFilename, bool) {
+	if isFTC() {
+		return parseFTCFilename(name)
+	}
 	if p, ok := parseTBAFilename(name); ok {
 		return p.canonical(), true
 	}
@@ -134,7 +140,11 @@ func parseFIMInSeasonFilename(name string) (parsedFilename, bool) {
 }
 
 // matchLabel is the human-readable label, e.g. "Qualification 5" or "Final 1".
+// An FTC match is labelled with FTC Live's short name ("Q3").
 func (p parsedFilename) matchLabel() string {
+	if p.ShortName != "" {
+		return p.ShortName
+	}
 	return p.Level + " " + strconv.Itoa(p.MatchNumber)
 }
 

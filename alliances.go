@@ -31,7 +31,8 @@ func teamNameByNumber() map[int]string {
 		return rosterNames
 	}
 	names := map[int]string{}
-	if fmsURL != "" {
+	// FTC events have no FMS; -fms-url's default would only time out.
+	if fmsURL != "" && !isFTC() {
 		client := http.Client{Timeout: 5 * time.Second}
 		if resp, err := client.Get(fmsURL + "/api/v1.0/audience/get/GetQualificationRankData"); err == nil {
 			defer resp.Body.Close()

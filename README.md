@@ -49,6 +49,9 @@ youtube-tba-upload \
 | `-video-dir` | `~/Videos` | The recording folder (holds the `.mp4`s and the shared database). |
 | `-fms-url` | `http://10.0.100.5` | FMS base, used to fill team names. |
 | `-tba-url` | `https://www.thebluealliance.com` | TBA base for match-video submission. |
+| `-program` | `frc` | `frc` (FMS names, TBA submit) or `ftc` (FTC Live names and scores, TOA submit). |
+| `-ftc-url` | none | FTC Live scorekeeper base (`http://host[:port]`), FTC only: qualification scores and teams. |
+| `-toa-url` | `https://api.theorangealliance.org` | TOA API base for match-video submission, FTC only. |
 | `-browser` | autodetect | Explicit browser executable. |
 
 Tool-local data (browser profiles, the managed Chrome, the playlist cache, logs)

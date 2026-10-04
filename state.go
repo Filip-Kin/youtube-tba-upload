@@ -66,6 +66,16 @@ type eventConfig struct {
 	// live only in state.json under the OS data dir, never in the repo.
 	TBAAuthID string `json:"tba_auth_id,omitempty"`
 	TBASecret string `json:"tba_secret,omitempty"`
+	// AutoSubmitTOA is AutoSubmitTBA's FTC twin: at an FTC event (-program ftc)
+	// each finished upload's URL is set on the match on The Orange Alliance.
+	// Defaults to on; needs TOAAPIKey + TOAEventKey and does nothing without.
+	AutoSubmitTOA bool `json:"auto_submit_toa"`
+	// TOAAPIKey is a TOA API key with write access (level 3 "Event Write" or
+	// 4); a myTOA account key is level 1 and is refused. TOAEventKey is the TOA
+	// event key the match keys are built on, e.g. "2627-FIM-TEST". Stored like
+	// the TBA credentials, and like them not redacted from the API.
+	TOAAPIKey   string `json:"toa_api_key,omitempty"`
+	TOAEventKey string `json:"toa_event_key,omitempty"`
 }
 
 // allianceTeam is one team's data inside a match's red or blue alliance.
@@ -83,6 +93,10 @@ type videoMeta struct {
 	MatchLabel  string                    `json:"match_label"`
 	Play        int                       `json:"play"`
 	Alliances   map[string][]allianceTeam `json:"alliances,omitempty"`
+	// TOAMatchKey is the full TOA match key at an FTC event
+	// ("2627-FIM-TEST-Q003-1"); empty at FRC events and when no TOA event key
+	// is configured.
+	TOAMatchKey string `json:"toa_match_key,omitempty"`
 }
 
 // videoEntry is one row in state.videos.
@@ -115,6 +129,11 @@ type videoEntry struct {
 	// offer a retry; it is cleared on a successful submit.
 	TBASubmitted   bool   `json:"tba_submitted,omitempty"`
 	TBASubmitError string `json:"tba_submit_error,omitempty"`
+	// TOASubmitted / TOASubmitError are the same bookkeeping for The Orange
+	// Alliance at FTC events, and TOAMatchKey the key the video was sent to.
+	TOASubmitted   bool   `json:"toa_submitted,omitempty"`
+	TOASubmitError string `json:"toa_submit_error,omitempty"`
+	TOAMatchKey    string `json:"toa_match_key,omitempty"`
 }
 
 // eventState is the uploader's in-memory view. It is persisted to the shared

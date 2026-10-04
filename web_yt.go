@@ -29,6 +29,59 @@ func registerYTRoutes(handle func(method, path string, handler func(http.Respons
 	handle(http.MethodPost, "/api/yt/playlists/create", apiYTCreatePlaylist)
 	handle(http.MethodPost, "/api/yt/backfill", apiYTBackfill)
 	handle(http.MethodPost, "/api/yt/submit-tba", apiYTSubmitTBA)
+	handle(http.MethodPost, "/api/yt/submit-toa", apiYTSubmitTOA)
+}
+
+// apiYTSubmitTOA is apiYTSubmitTBA for The Orange Alliance at FTC events: with
+// {"filename": "..."} it (re)submits that video, without one it submits every
+// uploaded video not yet on TOA.
+func apiYTSubmitTOA(w http.ResponseWriter, r *http.Request) {
+	key, ok := requireEventKey(r, w)
+	if !ok {
+		return
+	}
+	var body filenameBody
+	_ = json.NewDecoder(r.Body).Decode(&body) // filename optional
+	if !isFTC() {
+		writeJSONError(w, http.StatusBadRequest, "TOA submission is for FTC events (-program ftc)")
+		return
+	}
+	m, err := getOrCreateManager(key)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	st := m.store.snapshot()
+	if st.Config.TOAAPIKey == "" || st.Config.TOAEventKey == "" {
+		writeJSONError(w, http.StatusBadRequest, "TOA API key/event key not set")
+		return
+	}
+
+	var targets []string
+	if body.Filename != "" {
+		targets = []string{body.Filename}
+		_ = m.store.update(func(s *eventState) {
+			if v := s.Videos[body.Filename]; v != nil {
+				v.TOASubmitted = false
+			}
+		})
+	} else {
+		for name, entry := range st.Videos {
+			if entry.Status == statusUploaded && entry.YTVideoID != "" && !entry.TOASubmitted {
+				targets = append(targets, name)
+			}
+		}
+	}
+
+	submitted := 0
+	for _, name := range targets {
+		m.submitToTOA(name)
+		if v := m.store.snapshot().Videos[name]; v != nil && v.TOASubmitted {
+			submitted++
+		}
+	}
+	writeJSON(w, map[string]any{"ok": true, "attempted": len(targets), "submitted": submitted})
 }
 
 // apiYTSubmitTBA posts uploaded videos' URLs to their TBA matches. With a
@@ -229,6 +282,9 @@ func runBackfill(m *uploadManager, profile ytstudio.Profile, playlistName string
 			}
 			if r, b, ok := scoreForFile(m.store, it.Filename); ok {
 				ctx.RedScore, ctx.BlueScore, ctx.HasScore = r, b, true
+			}
+			if isFTC() {
+				fillFromFTCLive(ctx, m.store, it.Filename, p)
 			}
 			ctx.Title = renderTitle(cfg.TitleTemplate, ctx)
 			description = renderDescription(cfg.DescriptionTemplate, ctx)
