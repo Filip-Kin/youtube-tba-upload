@@ -3,8 +3,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -88,4 +91,57 @@ func resolvePlaylistTitle(ctx context.Context, profile ytstudio.Profile, playlis
 		return ""
 	}
 	return playlistTitleByID(pls, playlistID)
+}
+
+// eventPlaylistName is the playlist an event's match videos go into: the
+// event's {video_prefix}, rendered the way titles render it, from the first
+// match video in the folder (or the configured event name when there is none).
+func eventPlaylistName(st eventState) string {
+	type named struct {
+		p    parsedFilename
+		name string
+	}
+	var vids []named
+	for name := range st.Videos {
+		if p, ok := parseFilename(name); ok {
+			vids = append(vids, named{p, name})
+		}
+	}
+	sort.Slice(vids, func(i, j int) bool {
+		if ki, kj := vids[i].p.orderKey(), vids[j].p.orderKey(); ki != kj {
+			return ki < kj
+		}
+		return vids[i].name < vids[j].name
+	})
+	p := parsedFilename{}
+	if len(vids) > 0 {
+		p = vids[0].p
+	}
+	return strings.TrimSpace(buildTemplateContext(p, nil, st.Config).VideoPrefix)
+}
+
+// ensurePlaylist returns the channel's playlist titled name, creating it with
+// the given visibility when the channel has none by that title. Reusing an
+// exact title match means a restart or a second click never makes a duplicate.
+func ensurePlaylist(ctx context.Context, profile ytstudio.Profile, name, visibility string) (ytstudio.Playlist, error) {
+	if name == "" {
+		return ytstudio.Playlist{}, errors.New("no event name to title the playlist")
+	}
+	pls, err := refreshPlaylists(ctx, profile)
+	if err != nil {
+		return ytstudio.Playlist{}, err
+	}
+	for _, pl := range pls {
+		if strings.EqualFold(strings.TrimSpace(pl.Title), name) {
+			return pl, nil
+		}
+	}
+	pl, err := driver.CreatePlaylist(ctx, profile, name, visibility)
+	if err != nil {
+		return ytstudio.Playlist{}, err
+	}
+	cache := loadPlaylistCache()
+	cache.Playlists = append([]ytstudio.Playlist{pl}, pls...)
+	savePlaylistCache(cache)
+	return pl, nil
 }

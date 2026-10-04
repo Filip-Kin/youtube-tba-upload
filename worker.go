@@ -273,6 +273,24 @@ func (m *uploadManager) uploadOne() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// The first upload of an event with no playlist set gets the event's own
+	// playlist, made (or reused by title) now and saved to the event config.
+	// Only the first: once a video is up, an empty playlist is the operator's
+	// choice. A failure here never blocks the upload.
+	if cfg.PlaylistID == "" && cfg.PlaylistName == "" && !m.anyUploaded() {
+		st := m.store.snapshot()
+		if pl, err := ensurePlaylist(ctx, browserProfile(cfg), eventPlaylistName(st), uploadVisibility(cfg)); err != nil {
+			log.Printf("upload: event playlist: %v", err)
+		} else {
+			log.Printf("upload: event playlist %q (%s)", pl.Title, pl.ID)
+			_ = m.store.update(func(s *eventState) {
+				s.Config.PlaylistID = pl.ID
+				s.Config.PlaylistName = pl.Title
+			})
+			cfg.PlaylistID, cfg.PlaylistName = pl.ID, pl.Title
+		}
+	}
+
 	// Prefer the stored playlist ID: resolve it to the playlist's current title
 	// from the channel's own list, so a typed name or a rename can't leave the
 	// video out of the playlist. Fall back to the configured name on any miss.
@@ -429,6 +447,16 @@ type pendingUpload struct {
 	filename    string
 	title       string
 	description string
+}
+
+// anyUploaded reports whether any video of this event is already on YouTube.
+func (m *uploadManager) anyUploaded() bool {
+	for _, v := range m.store.snapshot().Videos {
+		if v.YTVideoID != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // pickNext returns the highest-priority work item: lowest orderKey among

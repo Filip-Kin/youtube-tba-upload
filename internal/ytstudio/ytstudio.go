@@ -135,6 +135,10 @@ type Driver interface {
 	// to resolve a stored playlist_id to its current title before an add.
 	ListPlaylists(ctx context.Context, profile Profile, channelID string) ([]Playlist, string, error)
 
+	// CreatePlaylist makes a new playlist on the signed-in channel with the
+	// given title and visibility (PUBLIC, UNLISTED or PRIVATE) and returns it.
+	CreatePlaylist(ctx context.Context, profile Profile, title, visibility string) (Playlist, error)
+
 	// Backfill re-applies description and/or playlist membership to a video that
 	// is already on YouTube, addressed by its 11-char ID. Non-fatal per step:
 	// the returned BackfillResult reports which parts failed.

@@ -26,6 +26,7 @@ import (
 // has the same signature as the closure defined in main().
 func registerYTRoutes(handle func(method, path string, handler func(http.ResponseWriter, *http.Request))) {
 	handle(http.MethodGet, "/api/yt/playlists", apiYTPlaylists)
+	handle(http.MethodPost, "/api/yt/playlists/create", apiYTCreatePlaylist)
 	handle(http.MethodPost, "/api/yt/backfill", apiYTBackfill)
 	handle(http.MethodPost, "/api/yt/submit-tba", apiYTSubmitTBA)
 }
@@ -110,6 +111,28 @@ func apiYTPlaylists(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, pls)
+}
+
+// apiYTCreatePlaylist makes (or reuses, by title) the event's playlist, named
+// after the event's {video_prefix}, and returns it as {"id","title"}. It does
+// not select it: the settings dialog sets the field and Save stores it.
+func apiYTCreatePlaylist(w http.ResponseWriter, r *http.Request) {
+	key, ok := requireEventKey(r, w)
+	if !ok {
+		return
+	}
+	m, err := getOrCreateManager(key)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	st := m.store.snapshot()
+	pl, err := ensurePlaylist(r.Context(), browserProfile(st.Config), eventPlaylistName(st), uploadVisibility(st.Config))
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, pl)
 }
 
 // backfillItem is one already-uploaded video to re-process.

@@ -623,7 +623,11 @@ func apiUploadGetState(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, m.store.snapshot())
+	st := m.store.snapshot()
+	writeJSON(w, struct {
+		eventState
+		EventPlaylistName string `json:"event_playlist_name"`
+	}{st, eventPlaylistName(st)})
 }
 
 func apiUploadScan(w http.ResponseWriter, r *http.Request) {

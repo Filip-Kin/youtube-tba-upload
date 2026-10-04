@@ -150,6 +150,13 @@ func (s *stateStore) load() error {
 		if json.Unmarshal(data, &ss) == nil {
 			if ss.Config.ProfileName != "" || ss.Config.EventKey != "" {
 				s.state.Config = ss.Config
+				// A folder reused for a new event keeps its other settings, but
+				// never the old event's playlist: last week's matches playlist
+				// must not take this week's videos.
+				if s.state.Config.EventKey != "" && s.state.Config.EventKey != s.eventKey {
+					s.state.Config.PlaylistID = ""
+					s.state.Config.PlaylistName = ""
+				}
 				if s.state.Config.EventKey == "" {
 					s.state.Config.EventKey = s.eventKey
 				}

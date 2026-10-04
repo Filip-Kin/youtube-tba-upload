@@ -302,3 +302,29 @@ func TestLoadRequeuesInterruptedUpload(t *testing.T) {
 		t.Fatalf("b: %+v", b)
 	}
 }
+
+// The event playlist is named after the first match video's prefix, and a
+// playlist saved for a different event is dropped when the folder is reopened
+// under a new event key.
+func TestEventPlaylistNameAndEventGuard(t *testing.T) {
+	dir := t.TempDir()
+	ss := uploaderState{
+		Config: eventConfig{EventKey: "lastweek", PlaylistID: "PLold", PlaylistName: "Last Week"},
+		UnmatchedUploads: map[string]*videoEntry{
+			"2026 Test - Qualification Match 12.mp4": {Status: statusStable},
+			"2026 Test - Qualification Match 3.mp4":  {Status: statusStable},
+		},
+	}
+	data, _ := json.Marshal(ss)
+	if err := os.WriteFile(filepath.Join(dir, uploaderStateFileName), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := openStoreFor(t, dir)
+	st := s.snapshot()
+	if st.Config.PlaylistID != "" || st.Config.PlaylistName != "" {
+		t.Fatalf("old event's playlist kept: %+v", st.Config)
+	}
+	if got := eventPlaylistName(st); got != "2026 Test" {
+		t.Fatalf("eventPlaylistName = %q, want %q", got, "2026 Test")
+	}
+}
