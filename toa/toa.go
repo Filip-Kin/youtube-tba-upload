@@ -18,8 +18,14 @@
 //     revoked, and GateKeeper.validate only lets a PUT through at access level
 //     3 ("Event Write") or 4 ("All Access"). The key a myTOA user gets from
 //     their account page is created at level 1, so it cannot write.
-//   - The write answers 200 with {success, modified_count, ...} even when no
-//     match had that key, so a zero modified_count is checked with a read.
+//   - Write keys are per event: an account requests one on its myTOA page
+//     (Write keys card) for one event and the "Match videos" scope, a TOA
+//     admin approves it, and it stops working 7 days after the event ends.
+//     It is refused for a match of any other event.
+//   - The write answers matched_count and unknown_match_keys, so a key with no
+//     match is reported, not passed. An older TOA-API answered only
+//     modified_count, and wrote into its current season whatever the key; for
+//     that case a zero modified_count is still checked with a read.
 package toa
 
 import (
@@ -81,17 +87,35 @@ type matchVideo struct {
 	VideoURL string `json:"video_url"`
 }
 
-// bulkWriteResult is TOA's BulkWritePretty response (src/models/PostPutResponse.ts).
-type bulkWriteResult struct {
-	Success       json.RawMessage `json:"success"`
-	ModifiedCount int             `json:"modified_count"`
+// videoWriteResult is the PUT /api/match/video response. UnknownMatchKeys is
+// nil on an older TOA-API that did not send it.
+type videoWriteResult struct {
+	Success          json.RawMessage `json:"success"`
+	MatchedCount     int             `json:"matched_count"`
+	ModifiedCount    int             `json:"modified_count"`
+	UnknownMatchKeys []string        `json:"unknown_match_keys"`
+}
+
+// apiError is TOA's error body.
+type apiError struct {
+	Message string `json:"_message"`
+}
+
+// statusError turns a non-200 TOA answer into an error carrying TOA's own
+// message ("This event key is for a different event.") when it sent one.
+func statusError(code int, raw []byte) error {
+	var e apiError
+	if json.Unmarshal(raw, &e) == nil && e.Message != "" {
+		return fmt.Errorf("TOA %d: %s", code, e.Message)
+	}
+	return fmt.Errorf("TOA %d: %s", code, strings.TrimSpace(string(raw)))
 }
 
 var client = &http.Client{Timeout: 10 * time.Second}
 
-// SubmitMatchVideo sets one match's video URL on TOA. apiKey is a TOA API key
-// with access level 3 or 4; matchKey is a full TOA match key from QualMatchKey
-// or PlayoffMatchKey.
+// SubmitMatchVideo sets one match's video URL on TOA. apiKey is a TOA event
+// write key with the "Match videos" scope (or a level-4 key); matchKey is a
+// full TOA match key from QualMatchKey or PlayoffMatchKey.
 func SubmitMatchVideo(baseURL, apiKey, matchKey, videoURL string) error {
 	if apiKey == "" {
 		return fmt.Errorf("no TOA API key")
@@ -117,19 +141,28 @@ func SubmitMatchVideo(baseURL, apiKey, matchKey, videoURL string) error {
 	defer res.Body.Close()
 	raw, _ := io.ReadAll(res.Body)
 	if res.StatusCode != http.StatusOK {
-		return fmt.Errorf("TOA %d: %s", res.StatusCode, strings.TrimSpace(string(raw)))
+		return statusError(res.StatusCode, raw)
 	}
-	var out bulkWriteResult
+	var out videoWriteResult
 	if err := json.Unmarshal(raw, &out); err != nil {
 		return fmt.Errorf("TOA response: %v: %s", err, strings.TrimSpace(string(raw)))
+	}
+	if out.UnknownMatchKeys != nil {
+		for _, k := range out.UnknownMatchKeys {
+			if k == matchKey {
+				return fmt.Errorf("TOA has no match %s", matchKey)
+			}
+		}
+		if out.MatchedCount > 0 {
+			return nil
+		}
 	}
 	if out.ModifiedCount > 0 {
 		return nil
 	}
-	// Nothing changed. Either the match already had this URL (a resubmit), or
-	// no match has this key in the collection the write went to. TOA-API writes
-	// videos into its hard-coded current season, so a key from any other season
-	// lands here too. Read the match back to tell the two apart.
+	// Older TOA-API: nothing changed. Either the match already had this URL (a
+	// resubmit), or no match has this key in the season it wrote to. Read the
+	// match back to tell the two apart.
 	current, err := matchVideoURL(base, apiKey, matchKey)
 	if err != nil {
 		return fmt.Errorf("TOA changed no match for %s: %v", matchKey, err)
@@ -155,7 +188,7 @@ func matchVideoURL(base, apiKey, matchKey string) (string, error) {
 	defer res.Body.Close()
 	raw, _ := io.ReadAll(res.Body)
 	if res.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("read back %d: %s", res.StatusCode, strings.TrimSpace(string(raw)))
+		return "", fmt.Errorf("read back: %w", statusError(res.StatusCode, raw))
 	}
 	var matches []struct {
 		VideoURL *string `json:"video_url"`

@@ -5,7 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"strings"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -38,6 +38,9 @@ func TestVideoURL(t *testing.T) {
 // fakeTOA records requests and answers the PUT with modified, and the GET with
 // stored (nil = 404).
 type fakeTOA struct {
+	newAPI   bool // answer matched_count + unknown_match_keys like TOA-API since 2026-10
+	matched  int
+	unknown  []string
 	modified int
 	stored   *string
 	status   int
@@ -54,7 +57,18 @@ func (f *fakeTOA) handler(t *testing.T) http.HandlerFunc {
 			f.putBody, _ = io.ReadAll(r.Body)
 			if f.status != 0 {
 				w.WriteHeader(f.status)
-				_, _ = w.Write([]byte(`{"code":400,"message":"Your API key does not have the required access level for this action."}`))
+				_, _ = w.Write([]byte(`{"_code":` + strconv.Itoa(f.status) + `,"_message":"This event key is for a different event."}`))
+				return
+			}
+			if f.newAPI {
+				unknown := f.unknown
+				if unknown == nil {
+					unknown = []string{}
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"success": true, "matched_count": f.matched, "modified_count": f.modified,
+					"unknown_match_keys": unknown,
+				})
 				return
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -96,13 +110,12 @@ func TestSubmitMatchVideoRequestShape(t *testing.T) {
 
 func TestSubmitMatchVideoErrors(t *testing.T) {
 	// TOA's permission error is a 400 with a JSON message; it comes back whole.
-	f := &fakeTOA{status: 400}
+	f := &fakeTOA{status: 403}
 	srv := httptest.NewServer(f.handler(t))
 	defer srv.Close()
 	err := SubmitMatchVideo(srv.URL, "level3key", "2627-FIM-TEST-Q003-1", VideoURL("abcdefghijk"))
 	if assert.Error(t, err) {
-		assert.True(t, strings.Contains(err.Error(), "TOA 400"), err.Error())
-		assert.True(t, strings.Contains(err.Error(), "access level"), err.Error())
+		assert.Equal(t, "TOA 403: This event key is for a different event.", err.Error())
 	}
 
 	// Missing inputs never reach the network.
@@ -135,5 +148,30 @@ func TestSubmitMatchVideoNothingModified(t *testing.T) {
 	if assert.Error(t, err) {
 		assert.Contains(t, err.Error(), "changed no match")
 	}
+	srv.Close()
+}
+
+func TestSubmitMatchVideoNewAPI(t *testing.T) {
+	url := VideoURL("abcdefghijk")
+
+	// Changed, or already this URL (matched but not modified): success, no read.
+	for _, f := range []*fakeTOA{
+		{newAPI: true, matched: 1, modified: 1},
+		{newAPI: true, matched: 1, modified: 0},
+	} {
+		srv := httptest.NewServer(f.handler(t))
+		assert.NoError(t, SubmitMatchVideo(srv.URL, "level3key", "2627-FIM-TEST-Q003-1", url))
+		assert.Empty(t, f.gets)
+		srv.Close()
+	}
+
+	// TOA names the key as unknown: a clear error, no read.
+	f := &fakeTOA{newAPI: true, unknown: []string{"2627-FIM-TEST-Q099-1"}}
+	srv := httptest.NewServer(f.handler(t))
+	err := SubmitMatchVideo(srv.URL, "level3key", "2627-FIM-TEST-Q099-1", url)
+	if assert.Error(t, err) {
+		assert.Equal(t, "TOA has no match 2627-FIM-TEST-Q099-1", err.Error())
+	}
+	assert.Empty(t, f.gets)
 	srv.Close()
 }
