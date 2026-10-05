@@ -83,9 +83,6 @@ func fillFTCMeta(entry *videoEntry, filename string, cfg eventConfig) {
 func (m *uploadManager) submitToTOA(filename string) {
 	st := m.store.snapshot()
 	cfg := st.Config
-	if !cfg.AutoSubmitTOA {
-		return
-	}
 	entry := st.Videos[filename]
 	if entry == nil || entry.Status != statusUploaded || entry.YTVideoID == "" || entry.TOASubmitted {
 		return

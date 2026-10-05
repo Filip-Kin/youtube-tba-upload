@@ -554,9 +554,7 @@ func apiUploadSaveConfig(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	// auto_submit_toa defaults to on when the body leaves it out; decoding
-	// leaves fields the body does not name untouched.
-	cfg := eventConfig{AutoSubmitTOA: true}
+	var cfg eventConfig
 	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
@@ -729,7 +727,9 @@ func browserProfile(cfg eventConfig) ytstudio.Profile {
 		Directory:   cfg.BrowserProfileDirectory,
 		DebugPort:   cfg.BrowserDebugPort,
 		Exe:         cfg.BrowserExe,
-		Headless:    cfg.Headless,
+		// Uploads always run hidden; sign-in and Open channel force a
+		// visible window themselves.
+		Headless: true,
 	}
 }
 

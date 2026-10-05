@@ -315,10 +315,6 @@ func TestSubmitToTOA(t *testing.T) {
 		es.Videos["P1_fimavtest.mp4"] = &videoEntry{Status: statusUploaded, YTVideoID: "practice123"}
 	})
 
-	if !s.snapshot().Config.AutoSubmitTOA {
-		t.Fatal("auto_submit_toa should default on")
-	}
-
 	// No credentials: silent no-op, nothing recorded.
 	m.submitToTOA("Q3_fimavtest.mp4")
 	if len(*bodies) != 0 || s.snapshot().Videos["Q3_fimavtest.mp4"].TOASubmitError != "" {
@@ -378,24 +374,5 @@ func TestScanFillsToaMatchKey(t *testing.T) {
 	}
 	if p := st.Videos["P1_fimavtest.mp4"]; p == nil || p.Meta != nil {
 		t.Errorf("practice entry = %+v", p)
-	}
-}
-
-// Settings saved before TOA support have no auto_submit_toa; it defaults on.
-func TestAutoSubmitTOADefaultsOnForOldSettings(t *testing.T) {
-	dir := t.TempDir()
-	old := `{"config":{"event_key":"2026test","profile_name":"youtube","auto_submit_tba":false}}`
-	if err := os.WriteFile(filepath.Join(dir, uploaderStateFileName), []byte(old), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	s := openStoreFor(t, dir)
-	if !s.snapshot().Config.AutoSubmitTOA {
-		t.Error("auto_submit_toa off after loading old settings")
-	}
-	// An explicit false survives a reload.
-	_ = s.update(func(es *eventState) { es.Config.AutoSubmitTOA = false })
-	s2 := openStoreFor(t, dir)
-	if s2.snapshot().Config.AutoSubmitTOA {
-		t.Error("explicit auto_submit_toa=false lost on reload")
 	}
 }

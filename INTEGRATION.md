@@ -109,8 +109,8 @@ Base `http://localhost:8807`. Permissive CORS; event-scoped routes take
 
 **Config** — `GET /api/upload/config?event_key=E` → the config object (§4).
 `POST` the same object to save (empty templates default; save triggers a rescan).
-This is where the tab writes `tba_auth_id`, `tba_secret`, `auto_submit_tba`,
-`playlist_id`+`playlist_name`, templates, visibility, `headless`,
+This is where the tab writes `tba_auth_id`, `tba_secret`,
+`playlist_id`+`playlist_name`, templates, visibility,
 `thumbnail_path`, and browser profile fields. The template defaults the UI shows
 MUST equal the uploader defaults in `template.go` (`defaultTitleTemplate`,
 `defaultDescriptionTemplate`) — supported placeholders are `{video_prefix}`,
@@ -136,8 +136,8 @@ in §4. Poll ~5 s to render the table.
 `GET /api/upload/profile/check?event_key=E` (→ `{channel_name}` or `{error}`;
 also updates the global sign-in status).
 - `POST /api/upload/login` (alias of `/api/upload/profile/login`) — opens a
-  **headed** browser for the operator to sign in to YouTube. Always headed,
-  regardless of the headless setting. Returns immediately; the operator closes
+  **headed** browser for the operator to sign in to YouTube. Uploads always run
+  headless; sign-in is always headed. Returns immediately; the operator closes
   the window to finish. Body `{event_key, profile_name?}`.
 - `POST /api/upload/logout` — closes any open browser and **deletes the managed
   profile directory** so the next sign-in starts fresh. Refuses a live
@@ -230,14 +230,11 @@ Follow FIM-AV Assistant's existing idioms (verified against branch
   "title_template": "...", "description_template": "...",
   "thumbnail_path": "...",               // local image path; ytstudio sets it as the thumbnail
   "visibility": "UNLISTED",              // PUBLIC | UNLISTED | PRIVATE
-  "headless": true,                      // run the upload browser hidden (default); sign-in is always headed
   "browser_user_data_dir": "", "browser_profile_directory": "",
   "browser_debug_port": 0, "browser_exe": "",
   "cut_wait_seconds": 0,                 // 0=default 120s; <0=don't wait for cut
-  "auto_submit_tba": true,               // post URL to TBA after upload
-  "tba_auth_id": "", "tba_secret": "",   // event trusted-API creds
-  "auto_submit_toa": true,               // FTC: set URL on TOA after upload (default on)
-  "toa_api_key": "", "toa_event_key": "" // FTC: TOA key (level 3+), e.g. "2627-FIM-TEST"
+  "tba_auth_id": "", "tba_secret": "",   // set = each upload's URL is posted to TBA
+  "toa_api_key": "", "toa_event_key": "" // FTC, set = each upload's URL is set on TOA (key level 3+)
 }
 ```
 

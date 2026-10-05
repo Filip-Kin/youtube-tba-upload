@@ -392,9 +392,6 @@ func (m *uploadManager) submitToTBA(filename string) {
 	}
 	st := m.store.snapshot()
 	cfg := st.Config
-	if !cfg.AutoSubmitTBA {
-		return
-	}
 	entry := st.Videos[filename]
 	if entry == nil || entry.Status != statusUploaded || entry.YTVideoID == "" || entry.TBASubmitted {
 		return

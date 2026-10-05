@@ -38,9 +38,6 @@ type eventConfig struct {
 	ThumbnailPath       string `json:"thumbnail_path"`
 	// Visibility is PUBLIC, UNLISTED or PRIVATE. Empty means unlisted.
 	Visibility string `json:"visibility,omitempty"`
-	// Headless runs the upload browser hidden (default). Turned off, uploads run
-	// in a visible window. Sign-in is always headed regardless of this.
-	Headless bool `json:"headless"`
 	// Browser* point the driver at an installed browser's own profile instead
 	// of a profile this tool owns, so there is no second YouTube sign-in.
 	// BrowserUserDataDir is the browser's "User Data" folder,
@@ -56,20 +53,17 @@ type eventConfig struct {
 	// (see defaultCutWaitSeconds); a negative value uploads recordings as soon
 	// as they are stable, cut or not.
 	CutWaitSeconds int `json:"cut_wait_seconds,omitempty"`
-	// AutoSubmitTBA, when set, posts each finished upload's YouTube URL to the
-	// match on The Blue Alliance (trusted match_videos/add) as part of the
-	// upload flow. Needs TBAAuthID + TBASecret; does nothing without them.
-	AutoSubmitTBA bool `json:"auto_submit_tba"`
+	// TBAAuthID / TBASecret are the event's trusted-API credentials. With both
+	// set, each finished upload's YouTube URL is posted to its match on The
+	// Blue Alliance (trusted match_videos/add); without them nothing is sent.
 	// TBAAuthID / TBASecret are the event's trusted-API credentials. The root
 	// TBA-uploader binary takes these per-request from the web UI; the uploader
 	// holds them in config so it can submit without that binary running. They
 	// live only in state.json under the OS data dir, never in the repo.
 	TBAAuthID string `json:"tba_auth_id,omitempty"`
 	TBASecret string `json:"tba_secret,omitempty"`
-	// AutoSubmitTOA is AutoSubmitTBA's FTC twin: at an FTC event (-program ftc)
-	// each finished upload's URL is set on the match on The Orange Alliance.
-	// Defaults to on; needs TOAAPIKey + TOAEventKey and does nothing without.
-	AutoSubmitTOA bool `json:"auto_submit_toa"`
+	// At an FTC event (-program ftc), with TOAAPIKey + TOAEventKey set, each
+	// finished upload's URL is set on its match on The Orange Alliance.
 	// TOAAPIKey is a TOA API key with write access (level 3 "Event Write" or
 	// 4); a myTOA account key is level 1 and is refused. TOAEventKey is the TOA
 	// event key the match keys are built on, e.g. "2627-FIM-TEST". Stored like
