@@ -10,3 +10,4 @@
 
 # Node (only needed to regenerate tba/consts.go)
 node_modules/
+*.syso

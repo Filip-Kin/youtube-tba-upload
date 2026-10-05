@@ -42,6 +42,17 @@ jobs:
             echo "v=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
           fi
 
+      # Windows version info + manifest (winres/winres.json), compiled into a
+      # .syso that go build links in. An unsigned exe with no publisher or
+      # version info is what Defender's machine-learning detection flags
+      # (v0.1.10 was quarantined as Trojan:Win32/Bearfoos.A!ml).
+      - name: Windows resources
+        run: |
+          v="${{ steps.ver.outputs.v }}"
+          case "$v" in *.*.*) ;; *) v=0.0.0 ;; esac
+          go install github.com/tc-hib/go-winres@v0.3.3
+          "$(go env GOPATH)/bin/go-winres" make --arch amd64 --product-version "$v" --file-version "$v"
+
       # The store is a plain JSON manifest now (no cgo), so the Windows uploader
       # cross-compiles on ubuntu with no Windows runner.
       - name: Cross-compile Windows exe
