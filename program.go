@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"strings"
+	"sync"
 )
 
 // The uploader runs at FRC events (FMS, The Blue Alliance) and at FTC events
@@ -15,12 +16,31 @@ const (
 	programFTC = "ftc"
 )
 
-// program is set once from the -program flag in main(). FRC is the default so
-// every existing launch keeps its behaviour.
-var program = programFRC
+// program is set from the -program flag in main(), and can be switched live by
+// POST /api/control/event. FRC is the default so every existing launch keeps
+// its behaviour. Read it through currentProgram/isFTC; the upload loop reads it
+// from its own goroutine.
+var (
+	programMu sync.RWMutex
+	program   = programFRC
+)
+
+// currentProgram returns the program in use.
+func currentProgram() string {
+	programMu.RLock()
+	defer programMu.RUnlock()
+	return program
+}
+
+// setProgram switches the program. The value must come from parseProgram.
+func setProgram(p string) {
+	programMu.Lock()
+	program = p
+	programMu.Unlock()
+}
 
 // isFTC reports whether this process is running for an FTC event.
-func isFTC() bool { return program == programFTC }
+func isFTC() bool { return currentProgram() == programFTC }
 
 // parseProgram validates the -program flag value.
 func parseProgram(v string) (string, error) {

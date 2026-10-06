@@ -43,6 +43,7 @@ func setSignIn(s signInState) {
 	signInMu.Lock()
 	signInStat = s
 	signInMu.Unlock()
+	hub.signinChanged()
 }
 
 // verifyChannelOnBoot resolves the signed-in channel for the default tool

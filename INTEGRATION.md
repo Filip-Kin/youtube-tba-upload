@@ -178,6 +178,52 @@ playlist over uploaded videos in match order (background). Run only when idle.
 watching}`. `POST /api/shutdown` → closes the browser and exits (also
 checkpoints the WAL).
 
+**Event stream.** `GET /api/events` is a Server-Sent Events stream
+(`text/event-stream`) on the same listener. Optional: the uploader works the same
+with no client connected, and any number of clients may connect. Each message is
+one `data:` line holding one JSON object whose `type` names it; there is no SSE
+`event:` field. A `: ping` comment goes out every 15 s.
+
+The first message is `hello`, with the full current state:
+
+```jsonc
+{"type":"hello","addon":"youtube-tba-upload","protocol":1,"version":"v0.1.7",
+ "signin":   {"signedIn":true,"channel":"FIM AV"},
+ "queue":    {"eventKey":"2026miket","counts":{"stable":2,"uploaded":14}},
+ "watching": {"videoDir":"C:\\Users\\FIM\\Videos\\2026 Kettering #1","eventKey":"2026miket","program":"frc"}}
+```
+
+Then one message per change:
+
+| `type` | Shape | Sent when |
+|---|---|---|
+| `signin` | `{signedIn, channel}` (`channel` null when signed out) | Sign-in, sign-out, a channel check, or an upload that finds the session expired (the current event's `needs_reauth` turns on; reported as `signedIn:false`). |
+| `queue` | `{eventKey, counts: {status: n}}` | The current event's counts change, at most once a second. Counts use the `upload_status` vocabulary and cover match videos only (practice, test and stray files are left out). |
+| `upload` | `{file, eventKey, match, status: "done"\|"failed", url\|null, error\|null}` | A video is uploaded (`done`, `url` is the watch URL) or fails for good (`failed`: attempts used up, or the session expired). An attempt that will be retried is not reported. `match` is the TBA match key (`qm5`), or the TOA key at an FTC event; null when there is none. |
+| `quota` | `{error}` | An upload error reads as YouTube refusing for volume (quota, daily upload limit, rate limit). |
+| `watching` | `{videoDir, eventKey, program}` | The folder, event or program changes (`/api/control/event`, the legacy `/save` form, or a first request for a new `event_key`). |
+
+The current event is the one last set by `/api/control/event`, or else the last
+`event_key` the API was first asked about.
+
+**Live control.** loopback only (anything else gets 403). Body is JSON; the
+answer is `{"ok":true}` or `{"ok":false,"error":"..."}`.
+
+- `POST /api/control/event` `{videoDir, eventKey?, program?: "frc"|"ftc",
+  ftcUrl?}` switches the watched folder, event and program without a restart.
+  The flags stay the startup defaults. A missing `eventKey` keeps the current
+  event; a missing `program` or `ftcUrl` keeps the current one. The previous
+  event's loops stop; an upload already running finishes and records its
+  result in its own folder. 409 if that would reopen a folder whose upload is
+  still running (try again when it finishes).
+- `POST /api/control/video` `{path}` says a finished match video is ready. It is
+  queued at once instead of after the scan's 20 s stable wait and the cut grace
+  window. The file must be a match video in the watched folder, and an event
+  must be set. A video still recording or being cut (per `fimav-matches.json`)
+  is held as the scan would hold it; one already uploading, uploaded, skipped or
+  failed is left alone. The folder scan is unchanged, so the uploader still
+  works with no one calling this.
+
 ---
 
 ## 3. Bundling, spawning, lifecycle (FIM-AV Assistant side)

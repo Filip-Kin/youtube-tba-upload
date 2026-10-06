@@ -32,7 +32,12 @@ import (
 
 const manifestFileName = "fimav-matches.json"
 
-func manifestPath() string { return filepath.Join(settings.VideoDir, manifestFileName) }
+func manifestPath() string { return manifestPathIn(settings.VideoDir) }
+
+// manifestPathIn is the manifest path for one recording folder. A store binds
+// its folder when it opens, so a live folder switch (POST /api/control/event)
+// can never make an old event's upload write into the new folder.
+func manifestPathIn(dir string) string { return filepath.Join(dir, manifestFileName) }
 
 // uploaderStateFileName holds SETTINGS ONLY (config, manual ids, reauth flag) —
 // not match/upload tracking, which is the shared manifest's single source of
@@ -40,7 +45,7 @@ func manifestPath() string { return filepath.Join(settings.VideoDir, manifestFil
 // uploader restart doesn't upload with default config before the next push.
 const uploaderStateFileName = "youtube-tba-upload.json"
 
-func uploaderStatePath() string { return filepath.Join(settings.VideoDir, uploaderStateFileName) }
+func uploaderStatePathIn(dir string) string { return filepath.Join(dir, uploaderStateFileName) }
 
 type uploaderState struct {
 	Config         eventConfig       `json:"config"`
@@ -88,8 +93,13 @@ type typedManifest struct {
 // stateStore owns one recording folder's manifest-backed state.
 type stateStore struct {
 	eventKey string
-	mu       sync.Mutex
-	state    eventState
+	// dir is the recording folder this store reads and writes, fixed at open.
+	dir   string
+	mu    sync.Mutex
+	state eventState
+	// onChange, when set, runs after every update (outside the lock). The event
+	// stream hangs off it; nil costs nothing.
+	onChange func(*stateStore)
 
 	// cache of the parsed manifest for read-only helpers (fimavRecord/present),
 	// keyed on the file's size+mtime so the 5s scan loop isn't re-parsing.
@@ -108,6 +118,7 @@ func openStateStore(eventKey string) (*stateStore, error) {
 	}
 	s := &stateStore{
 		eventKey: eventKey,
+		dir:      settings.VideoDir,
 		state: eventState{
 			Config: eventConfig{
 				EventKey:            eventKey,
@@ -130,7 +141,7 @@ func openStateStore(eventKey string) (*stateStore, error) {
 func (s *stateStore) load() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	doc, err := readTypedManifest()
+	doc, err := readTypedManifestIn(s.dir)
 	if err != nil {
 		return err
 	}
@@ -143,7 +154,7 @@ func (s *stateStore) load() error {
 		s.state.Videos[m.FileName] = &e
 	}
 	// Settings (config/kv/manual ids) from the uploader-private file, if present.
-	if data, err := os.ReadFile(uploaderStatePath()); err == nil && len(data) > 0 {
+	if data, err := os.ReadFile(uploaderStatePathIn(s.dir)); err == nil && len(data) > 0 {
 		var ss uploaderState
 		if json.Unmarshal(data, &ss) == nil {
 			if ss.Config.ProfileName != "" || ss.Config.EventKey != "" {
@@ -205,14 +216,37 @@ func (s *stateStore) snapshot() eventState {
 	return out
 }
 
+// queueSummary counts this event's match videos by status (files that parse as
+// a match the uploader would upload; practice, test and stray files are left
+// out) and returns the needs-sign-in flag. Cheaper than snapshot: no copy.
+func (s *stateStore) queueSummary() (map[string]int, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	counts := map[string]int{}
+	for name, v := range s.state.Videos {
+		if v == nil {
+			continue
+		}
+		if p, ok := parseFilename(name); !ok || !p.includeLevel() {
+			continue
+		}
+		counts[v.Status]++
+	}
+	return counts, s.state.NeedsReauth
+}
+
 // update mutates the in-memory state and writes the upload fields back to the
 // manifest. Config/kv are in-memory only, so a mutation that only touches those
 // still persists cheaply (no upload change => same file content on rename).
 func (s *stateStore) update(fn func(*eventState)) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	fn(&s.state)
-	return s.persistLocked()
+	err := s.persistLocked()
+	s.mu.Unlock()
+	if s.onChange != nil {
+		s.onChange(s)
+	}
+	return err
 }
 
 // persistLocked writes each known video's upload object into its manifest record
@@ -228,13 +262,13 @@ func (s *stateStore) persistLocked() error {
 	unmatched := map[string]*videoEntry{}
 
 	if len(s.state.Videos) > 0 {
-		release, err := acquireManifestLock()
+		release, err := acquireManifestLockIn(s.dir)
 		if err != nil {
 			return err
 		}
 		defer release()
 
-		raw, err := readRawManifest()
+		raw, err := readRawManifestIn(s.dir)
 		if err != nil {
 			return err
 		}
@@ -273,7 +307,7 @@ func (s *stateStore) persistLocked() error {
 			if err != nil {
 				return err
 			}
-			if err := writeFileAtomic(manifestPath(), out); err != nil {
+			if err := writeFileAtomic(manifestPathIn(s.dir), out); err != nil {
 				return err
 			}
 		}
@@ -289,7 +323,7 @@ func (s *stateStore) persistLocked() error {
 		UnmatchedUploads: unmatched,
 	}
 	if b, err := json.MarshalIndent(ss, "", "  "); err == nil {
-		_ = writeFileAtomic(uploaderStatePath(), b)
+		_ = writeFileAtomic(uploaderStatePathIn(s.dir), b)
 	}
 	return nil
 }
@@ -337,7 +371,7 @@ func (s *stateStore) fimavPresent() bool {
 func (s *stateStore) manifestCache() (map[string]typedMatch, bool) {
 	s.cacheMu.Lock()
 	defer s.cacheMu.Unlock()
-	info, err := os.Stat(manifestPath())
+	info, err := os.Stat(manifestPathIn(s.dir))
 	if err != nil {
 		s.cache = nil
 		s.cacheHad = false
@@ -347,7 +381,7 @@ func (s *stateStore) manifestCache() (map[string]typedMatch, bool) {
 	if s.cache != nil && s.cacheSize == sz && s.cacheMod == mt {
 		return s.cache, s.cacheHad
 	}
-	doc, err := readTypedManifest()
+	doc, err := readTypedManifestIn(s.dir)
 	byName := map[string]typedMatch{}
 	if err == nil {
 		for _, m := range doc.Matches {
@@ -365,9 +399,11 @@ func (s *stateStore) close() error { return nil }
 
 // ── manifest I/O ─────────────────────────────────────────────────────────────
 
-func readTypedManifest() (typedManifest, error) {
+func readTypedManifest() (typedManifest, error) { return readTypedManifestIn(settings.VideoDir) }
+
+func readTypedManifestIn(dir string) (typedManifest, error) {
 	var doc typedManifest
-	data, err := os.ReadFile(manifestPath())
+	data, err := os.ReadFile(manifestPathIn(dir))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return typedManifest{Version: 1}, nil
@@ -383,9 +419,9 @@ func readTypedManifest() (typedManifest, error) {
 	return doc, nil
 }
 
-func readRawManifest() (rawManifest, error) {
+func readRawManifestIn(dir string) (rawManifest, error) {
 	var raw rawManifest
-	data, err := os.ReadFile(manifestPath())
+	data, err := os.ReadFile(manifestPathIn(dir))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return rawManifest{Version: 1}, nil
@@ -431,8 +467,8 @@ func writeFileAtomic(path string, data []byte) error {
 // acquireManifestLock takes a cross-process advisory lock via an exclusive
 // .lock file. FIM-AV Assistant uses the same lock file + protocol. A lock older
 // than the stale timeout is stolen, so a crashed holder can't wedge writes.
-func acquireManifestLock() (func(), error) {
-	lock := manifestPath() + ".lock"
+func acquireManifestLockIn(dir string) (func(), error) {
+	lock := manifestPathIn(dir) + ".lock"
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		f, err := os.OpenFile(lock, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)

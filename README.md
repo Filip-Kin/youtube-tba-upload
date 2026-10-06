@@ -61,7 +61,9 @@ the recording folder.
 ## HTTP API
 
 See [INTEGRATION.md](INTEGRATION.md) for the full contract the Upload tab
-consumes (`/api/upload/*`, `/api/yt/*`, `/api/health`, `/api/shutdown`).
+consumes (`/api/upload/*`, `/api/yt/*`, `/api/health`, `/api/shutdown`), plus
+the optional event stream (`/api/events`) and live control routes
+(`/api/control/event`, `/api/control/video`).
 
 ## Regenerating `tba/consts.go`
 

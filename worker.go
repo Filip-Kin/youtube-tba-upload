@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Filip-Kin/youtube-tba-upload/internal/ytstudio"
@@ -38,6 +39,11 @@ type uploadManager struct {
 	// whether the last scan found the folder missing, so a folder that is not
 	// there yet is reported once instead of every five seconds.
 	missingDirLogged bool
+	// loops counts the running scan and upload loops, so a stop can be waited on.
+	loops sync.WaitGroup
+	// busy is true while an upload runs. A live switch will not reopen this
+	// folder under a new manager until it is false (see switchWatch).
+	busy atomic.Bool
 }
 
 // newUploadManager constructs a manager bound to the given state store and
@@ -52,8 +58,9 @@ func newUploadManager(store *stateStore, driver ytstudio.Driver) *uploadManager 
 }
 
 func (m *uploadManager) Start() {
-	go m.scanLoop()
-	go m.uploadLoop()
+	m.loops.Add(2)
+	go func() { defer m.loops.Done(); m.scanLoop() }()
+	go func() { defer m.loops.Done(); m.uploadLoop() }()
 }
 
 func (m *uploadManager) Stop() {
@@ -88,10 +95,11 @@ func (m *uploadManager) scanLoop() {
 // scanNow does one folder scan: discovers new files, updates stability, and
 // promotes entries whose size+mtime have been unchanged long enough.
 func (m *uploadManager) scanNow() {
-	// Watch the same folder AutoAV records to (settings.VideoDir, set by
-	// the -video-dir flag or the legacy /save endpoint). No need to
-	// duplicate it in per-event config.
-	dir := settings.VideoDir
+	// Watch the folder this event's store was opened on (settings.VideoDir at
+	// the time: the -video-dir flag, the legacy /save endpoint, or
+	// /api/control/event). A live switch builds a new manager, so this one
+	// never wanders into another event's folder.
+	dir := m.store.dir
 	if dir == "" {
 		return
 	}
@@ -247,6 +255,13 @@ func (m *uploadManager) uploadLoop() {
 		case <-m.kick:
 		case <-time.After(scanInterval):
 		}
+		// A stopped manager (retired by a live switch) can wake on a kick
+		// queued by its last upload; it must not start another.
+		select {
+		case <-m.quit:
+			return
+		default:
+		}
 		m.uploadOne()
 	}
 }
@@ -268,6 +283,8 @@ func (m *uploadManager) uploadOne() {
 		return
 	}
 	cfg := m.store.snapshot().Config
+	m.busy.Store(true)
+	defer m.busy.Store(false)
 
 	log.Printf("upload: starting %s", target.filename)
 	_ = m.store.update(func(s *eventState) {
@@ -308,7 +325,7 @@ func (m *uploadManager) uploadOne() {
 	}
 
 	result, err := m.driver.Upload(ctx, browserProfile(cfg), ytstudio.UploadInput{
-		VideoPath:     filepath.Join(settings.VideoDir, target.filename),
+		VideoPath:     filepath.Join(m.store.dir, target.filename),
 		Title:         target.title,
 		Description:   target.description,
 		ThumbnailPath: cfg.ThumbnailPath,
@@ -318,7 +335,17 @@ func (m *uploadManager) uploadOne() {
 
 	if err != nil {
 		log.Printf("upload: %s failed: %v", target.filename, err)
+		if isQuotaError(err) {
+			hub.emit("quota", quotaMsg{Error: err.Error()})
+		}
+		var final *videoEntry
 		_ = m.store.update(func(s *eventState) {
+			defer func() {
+				if v := s.Videos[target.filename]; v != nil && v.Status == statusFailed {
+					cp := *v
+					final = &cp
+				}
+			}()
 			v := s.Videos[target.filename]
 			v.Attempts++
 			v.LastError = err.Error()
@@ -338,6 +365,11 @@ func (m *uploadManager) uploadOne() {
 				v.Status = statusStable
 			}
 		})
+		// Only a final failure is reported; an attempt that will be retried
+		// is still in the queue.
+		if final != nil {
+			emitUpload(m.store.eventKey, target.filename, final)
+		}
 		return
 	}
 
@@ -366,6 +398,9 @@ func (m *uploadManager) uploadOne() {
 			s.LastChannelName = result.ChannelName
 		}
 	})
+	if v := m.store.snapshot().Videos[target.filename]; v != nil {
+		emitUpload(m.store.eventKey, target.filename, v)
+	}
 	// Post the video URL to its TBA match as part of the flow, so the match
 	// page has the video without a second tool or a manual step. Off the store
 	// lock: this makes a network call.

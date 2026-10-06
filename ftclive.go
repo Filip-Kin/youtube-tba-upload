@@ -32,8 +32,28 @@ import (
 	"time"
 )
 
-// ftcURL is the FTC Live base (http://host[:port]), set from -ftc-url.
+// ftcURL is the FTC Live base (http://host[:port]), set from -ftc-url or a
+// live switch (POST /api/control/event). Guarded by ftcMu.
 var ftcURL string
+
+// currentFTCURL returns the FTC Live base in use.
+func currentFTCURL() string {
+	ftcMu.Lock()
+	defer ftcMu.Unlock()
+	return ftcURL
+}
+
+// setFTCURL points FTC Live lookups at a new scorekeeper. A different base is a
+// different event, so the per-match cache is dropped with it.
+func setFTCURL(base string) {
+	base = strings.TrimRight(base, "/")
+	ftcMu.Lock()
+	defer ftcMu.Unlock()
+	if base != ftcURL {
+		ftcURL = base
+		ftcCache = map[string]*ftcMatchResult{}
+	}
+}
 
 // ftcMatchResult is what one FTC Live match lookup gave.
 type ftcMatchResult struct {
@@ -92,12 +112,12 @@ func ftcTeams(nums []int) []allianceTeam {
 // ftcMatch returns the result for one qualification, asking FTC Live at most
 // once per code+number for the life of the process.
 func ftcMatch(code string, number int) *ftcMatchResult {
-	if ftcURL == "" || code == "" {
-		return nil
-	}
 	key := fmt.Sprintf("%s/%d", code, number)
 	ftcMu.Lock()
 	defer ftcMu.Unlock()
+	if ftcURL == "" || code == "" {
+		return nil
+	}
 	if res, ok := ftcCache[key]; ok {
 		return res
 	}

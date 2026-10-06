@@ -69,6 +69,10 @@ type fimavRecord struct {
 // when cutting is switched off entirely.
 const defaultCutWaitSeconds = 120
 
+// reasonCutGrace is cutHold's reason during that grace window, when no cut is
+// visible yet. POST /api/control/video skips it: the caller says the file is final.
+const reasonCutGrace = "waiting for cut"
+
 // cutWaitSeconds resolves the configured grace period. 0 means "use the
 // default"; a negative value switches the whole gate off.
 func cutWaitSeconds(cfg eventConfig) int64 {
@@ -131,5 +135,5 @@ func cutHold(store *stateStore, filename string, cfg eventConfig) (bool, string)
 	if rec.EndedAt > 0 && nowUnix()-rec.EndedAt/1000 >= wait {
 		return false, ""
 	}
-	return true, "waiting for cut"
+	return true, reasonCutGrace
 }

@@ -63,12 +63,12 @@ func main() {
 	flag.Parse()
 	fmsURL = *fmsURLFlag
 	tbaURL = *tbaURLFlag
-	ftcURL = strings.TrimRight(*ftcURLFlag, "/")
+	setFTCURL(*ftcURLFlag)
 	toaURL = *toaURLFlag
 	if p, err := parseProgram(*programFlag); err != nil {
 		log.Fatal(err)
 	} else {
-		program = p
+		setProgram(p)
 	}
 
 	// Mirror all logs to a file so there's debug data after the fact, not just
@@ -79,7 +79,7 @@ func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 	log.Printf("=== autoav-helper start ===")
 	if isFTC() {
-		log.Printf("program ftc: FTC Live %q, TOA %s", ftcURL, toaURL)
+		log.Printf("program ftc: FTC Live %q, TOA %s", currentFTCURL(), toaURL)
 	}
 
 	// The -video-dir flag wins when explicitly given; otherwise a folder saved
@@ -127,6 +127,31 @@ func main() {
 		verifyChannelOnBoot()
 	}()
 
+	// Record what is being watched, so the event stream's first watching
+	// message has something to compare against.
+	hub.noteWatching()
+
+	mux := newMux()
+
+	// Shut the browser down on the way out; on Windows it outlives the process
+	// otherwise, and the next run then finds the profile locked.
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		sig := <-signals
+		log.Printf("shutting down (%s)", sig)
+		closeAllManagers()
+		closeDriver()
+		os.Exit(0)
+	}()
+
+	log.Printf("listening on %s", *addr)
+	_ = http.ListenAndServe(*addr, mux)
+}
+
+// newMux builds every HTTP route. Split out of main so tests can serve it with
+// httptest; it uses the package-level driver and state.
+func newMux() *http.ServeMux {
 	lock := sync.Mutex{}
 	mux := http.NewServeMux()
 	handle := func(method string, p string, handler func(w http.ResponseWriter, r *http.Request)) {
@@ -215,7 +240,7 @@ func main() {
 		writeJSON(w, map[string]any{
 			"status":       "ok",
 			"version":      Version,
-			"program":      program,
+			"program":      currentProgram(),
 			"video_dir":    settings.VideoDir,
 			"watching":     isEventFolder(settings.VideoDir),
 			"signed_in":    si.SignedIn,
@@ -223,6 +248,14 @@ func main() {
 			"sign_in":      si,
 		})
 	})
+	// Event stream and live control for FIM-AV Assistant (events.go,
+	// control.go). The stream is long-lived, so it is registered straight on
+	// the mux: going through handle would hold the request lock for the life of
+	// the connection and stall every other route.
+	mux.HandleFunc("/api/events", apiEvents)
+	handle(http.MethodPost, "/api/control/event", apiControlEvent)
+	handle(http.MethodPost, "/api/control/video", apiControlVideo)
+
 	// Graceful stop for the host app to call before it quits, so the browser is
 	// closed and the profile isn't left locked. Responds, then exits; the same
 	// path the signal handler takes.
@@ -231,25 +264,18 @@ func main() {
 		go func() {
 			log.Printf("shutting down (requested via /api/shutdown)")
 			closeAllManagers()
-			d.Close()
+			closeDriver()
 			os.Exit(0)
 		}()
 	})
+	return mux
+}
 
-	// Shut the browser down on the way out; on Windows it outlives the process
-	// otherwise, and the next run then finds the profile locked.
-	signals := make(chan os.Signal, 1)
-	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		sig := <-signals
-		log.Printf("shutting down (%s)", sig)
-		closeAllManagers()
-		d.Close()
-		os.Exit(0)
-	}()
-
-	log.Printf("listening on %s", *addr)
-	_ = http.ListenAndServe(*addr, mux)
+// closeDriver closes the browser if the driver owns one.
+func closeDriver() {
+	if cd, ok := driver.(*ytstudio.ChromedpDriver); ok {
+		cd.Close()
+	}
 }
 
 // ── helpers ────────────────────────────────────────────────────────────────
@@ -278,19 +304,27 @@ func requireEventKey(r *http.Request, w http.ResponseWriter) (string, bool) {
 
 // getOrCreateManager returns the long-lived uploadManager for the given event,
 // starting its background loops on first access.
+//
+// A newly created manager becomes the current event for the event stream
+// (queue counts, watching). It watches settings.VideoDir as it is now; a later
+// folder change goes through switchWatch, which retires it.
 func getOrCreateManager(eventKey string) (*uploadManager, error) {
 	managersMu.Lock()
-	defer managersMu.Unlock()
 	if m, ok := managers[eventKey]; ok {
+		managersMu.Unlock()
 		return m, nil
 	}
 	store, err := openStateStore(eventKey)
 	if err != nil {
+		managersMu.Unlock()
 		return nil, err
 	}
+	store.onChange = hub.storeChanged
 	m := newUploadManager(store, driver)
 	managers[eventKey] = m
 	m.Start()
+	managersMu.Unlock()
+	hub.setCurrent(store)
 	return m, nil
 }
 
@@ -332,10 +366,13 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
 
 	// Exactly one event folder and nothing valid chosen yet: pick it and persist.
 	if !isEventFolder(current) && len(folders) == 1 {
-		current = folders[0]
-		settings.VideoDir = current
-		if err := saveHelperConfig(helperConfig{VideoDir: current}); err != nil {
-			log.Printf("persist video dir: %v", err)
+		if err := switchWatch(folders[0], "", currentProgram(), nil); err != nil {
+			log.Printf("switch video dir: %v", err)
+		} else {
+			current = folders[0]
+			if err := saveHelperConfig(helperConfig{VideoDir: current}); err != nil {
+				log.Printf("persist video dir: %v", err)
+			}
 		}
 	}
 
@@ -382,9 +419,14 @@ func defaultVideoDir() string {
 
 func handleSaveSettings(w http.ResponseWriter, r *http.Request) {
 	if val := r.FormValue("VideoDir"); val != "" {
-		settings.VideoDir = val
+		// Same path as POST /api/control/event, so the running event moves to
+		// the new folder instead of writing into it from the old one.
+		if err := switchWatch(val, "", currentProgram(), nil); err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
 		// Persist so the choice isn't lost on the next restart.
-		if err := saveHelperConfig(helperConfig{VideoDir: val}); err != nil {
+		if err := saveHelperConfig(helperConfig{VideoDir: settings.VideoDir}); err != nil {
 			log.Printf("persist video dir: %v", err)
 		}
 	}

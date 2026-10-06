@@ -15,9 +15,9 @@ import (
 // asFTC runs the rest of a test as an FTC event (-program ftc).
 func asFTC(t *testing.T) {
 	t.Helper()
-	old := program
-	program = programFTC
-	t.Cleanup(func() { program = old })
+	old := currentProgram()
+	setProgram(programFTC)
+	t.Cleanup(func() { setProgram(old) })
 }
 
 func TestParseProgram(t *testing.T) {
@@ -176,15 +176,15 @@ func fakeFTCLive(t *testing.T, finished bool) (*httptest.Server, *int32) {
 
 func useFTCLive(t *testing.T, base string) {
 	t.Helper()
-	oldURL := ftcURL
-	ftcURL = base
 	ftcMu.Lock()
+	oldURL := ftcURL
 	oldCache := ftcCache
+	ftcURL = base
 	ftcCache = map[string]*ftcMatchResult{}
 	ftcMu.Unlock()
 	t.Cleanup(func() {
-		ftcURL = oldURL
 		ftcMu.Lock()
+		ftcURL = oldURL
 		ftcCache = oldCache
 		ftcMu.Unlock()
 	})
