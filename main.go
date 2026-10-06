@@ -354,8 +354,32 @@ func closeAllManagers() {
 
 // ── legacy "settings" endpoints (Vue calls /api/list and /api/rename) ─────
 
+// managed: run by FIM-AV Assistant (FIMAV_MANAGED=1). It sets the folder,
+// event and program over /api/control/event, so this page only shows them.
+var managed = os.Getenv("FIMAV_MANAGED") == "1"
+
 func handleRoot(w http.ResponseWriter, r *http.Request) {
 	current := settings.VideoDir
+	if managed {
+		w.Header().Add("content-type", "text/html")
+		key := hub.currentKey()
+		if key == "" {
+			key = "None"
+		}
+		folder := current
+		if folder == "" {
+			folder = "None"
+		}
+		_, _ = fmt.Fprintf(w, `
+		<p>Set by FIM-AV Assistant</p>
+		<dl>
+			<dt>Event folder</dt><dd>%s</dd>
+			<dt>Event</dt><dd>%s</dd>
+			<dt>Program</dt><dd>%s</dd>
+		</dl>
+	`, html.EscapeString(folder), html.EscapeString(key), html.EscapeString(currentProgram()))
+		return
+	}
 	// Event folders sit beside the current one; scan the parent (or the default
 	// Videos folder before anything is chosen).
 	parent := defaultVideoDir()
@@ -418,6 +442,10 @@ func defaultVideoDir() string {
 }
 
 func handleSaveSettings(w http.ResponseWriter, r *http.Request) {
+	if managed {
+		http.Error(w, "Set by FIM-AV Assistant", http.StatusConflict)
+		return
+	}
 	if val := r.FormValue("VideoDir"); val != "" {
 		// Same path as POST /api/control/event, so the running event moves to
 		// the new folder instead of writing into it from the old one.
