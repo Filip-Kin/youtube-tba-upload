@@ -1053,14 +1053,18 @@ func (d *ChromedpDriver) Upload(ctx context.Context, p Profile, in UploadInput) 
 
 	// Title: Studio auto-fills it from the filename; replace it with the rendered
 	// title. Non-fatal — the auto-filled title is an acceptable fallback.
-	if err := pierceSetText(bctx, "#title-textarea", in.Title); err != nil {
+	// Studio also fills the channel's upload defaults in a moment after the
+	// dialog opens and can overwrite what was typed, so each is read back and
+	// set again until it holds (DCC 2026-10-10: Q5 and Q6 went up as
+	// "title - Pit Podcast Ep#").
+	if err := ensureText(bctx, "#title-textarea", in.Title, d.logf); err != nil {
 		d.logf("title not set: %v (keeping auto-filled)", err)
 	} else {
 		d.logf("title set")
 	}
 	descriptionError := ""
 	if in.Description != "" {
-		if err := pierceSetText(bctx, "#description-textarea", in.Description); err != nil {
+		if err := ensureText(bctx, "#description-textarea", in.Description, d.logf); err != nil {
 			d.logf("description not set: %v (continuing)", err)
 			descriptionError = err.Error()
 		} else {
@@ -1102,6 +1106,16 @@ func (d *ChromedpDriver) Upload(ctx context.Context, p Profile, in UploadInput) 
 	// Step 6: advance DETAILS -> VIDEO_ELEMENTS -> CHECKS -> REVIEW by clicking
 	// Next, until the visibility radios appear. Next is disabled briefly while a
 	// step settles, so poll.
+	// Last look before leaving the details page: put the title and
+	// description back if anything replaced them since.
+	if err := ensureText(bctx, "#title-textarea", in.Title, d.logf); err != nil {
+		d.logf("title check before review: %v", err)
+	}
+	if in.Description != "" {
+		if err := ensureText(bctx, "#description-textarea", in.Description, d.logf); err != nil {
+			d.logf("description check before review: %v", err)
+		}
+	}
 	d.logf("step 6: advancing to review")
 	reachedReview := false
 	advanceDeadline := time.Now().Add(90 * time.Second)
@@ -1132,11 +1146,17 @@ func (d *ChromedpDriver) Upload(ctx context.Context, p Profile, in UploadInput) 
 	_ = chromedp.Run(bctx, chromedp.Evaluate(jsExtractVideoID, &videoID))
 	d.logf("captured video id (pre-save): %q", videoID)
 
-	// Step 8: publish (Done).
+	// Step 8: publish (Done), then wait for Studio to confirm it. A fixed 3 s
+	// let the session close before Studio had sent the save on a slow machine:
+	// at DCC 2026-10-10 every video stayed a Draft (Unlisted chosen, never saved).
 	if ok, err := pierceClick(bctx, "ytcp-button#done-button"); err != nil || !ok {
 		return UploadResult{}, fmt.Errorf("click done: ok=%v err=%v", ok, err)
 	}
-	_ = chromedp.Run(bctx, chromedp.Sleep(3*time.Second))
+	if waitPublished(bctx, 90*time.Second) {
+		d.logf("publish confirmed by Studio")
+	} else {
+		d.logf("publish NOT confirmed by Studio within 90s; the video may still be a draft")
+	}
 
 	if videoID == "" {
 		_ = chromedp.Run(bctx,
@@ -2464,6 +2484,86 @@ func jsShadowExists(sel string) string {
 			return hit;
 		})()
 	`, sel)
+}
+
+// jsShadowTextIn returns a JS expression (string) with the text of the first
+// element matching inner inside the first host matching host, piercing shadow
+// roots on the way to the host and inside it. "" when not found.
+func jsShadowTextIn(host, inner string) string {
+	return fmt.Sprintf(`
+		(() => {
+			function find(root, sel) {
+				const el = root.querySelector(sel);
+				if (el) return el;
+				for (const e of root.querySelectorAll('*')) {
+					if (e.shadowRoot) { const f = find(e.shadowRoot, sel); if (f) return f; }
+				}
+				return null;
+			}
+			const h = find(document, %q);
+			if (!h) return "";
+			const el = find(h, %q) || (h.shadowRoot && find(h.shadowRoot, %q));
+			return el ? (el.innerText || el.textContent || "") : "";
+		})()
+	`, host, inner, inner)
+}
+
+func normText(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
+// ensureText sets a details-dialog textbox and reads it back, setting it again
+// (up to 4 times) until it holds. Studio fills the channel's upload defaults
+// a moment after the dialog opens, which can land after what was typed.
+func ensureText(ctx context.Context, host, want string, logf func(string, ...interface{})) error {
+	var lastErr error
+	for attempt := 1; attempt <= 4; attempt++ {
+		var got string
+		_ = chromedp.Run(ctx, chromedp.Evaluate(jsShadowTextIn(host, "#textbox"), &got))
+		if normText(got) == normText(want) {
+			return nil
+		}
+		if attempt > 1 {
+			logf("%s reads %q, setting it again (try %d)", host, truncate(got, 60), attempt)
+		}
+		if err := pierceSetText(ctx, host, want); err != nil {
+			lastErr = err
+		}
+		_ = chromedp.Run(ctx, chromedp.Sleep(1500*time.Millisecond))
+	}
+	var got string
+	_ = chromedp.Run(ctx, chromedp.Evaluate(jsShadowTextIn(host, "#textbox"), &got))
+	if normText(got) == normText(want) {
+		return nil
+	}
+	if lastErr != nil {
+		return lastErr
+	}
+	return fmt.Errorf("%s still reads %q", host, truncate(got, 60))
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
+}
+
+// waitPublished waits for Studio to confirm the Save: the upload dialog's
+// Save/Done button goes away (dialog closed, or replaced by the "Video
+// published" dialog). False when it is still there at the deadline.
+func waitPublished(ctx context.Context, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		_ = chromedp.Run(ctx, chromedp.Sleep(time.Second))
+		var stillOpen, shared bool
+		_ = chromedp.Run(ctx, chromedp.Evaluate(jsShadowExists("ytcp-button#done-button"), &stillOpen))
+		_ = chromedp.Run(ctx, chromedp.Evaluate(jsShadowExists("ytcp-video-share-dialog"), &shared))
+		if shared || !stillOpen {
+			return true
+		}
+	}
+	return false
 }
 
 // dumpFormControls lists the visible form controls of the upload details dialog
