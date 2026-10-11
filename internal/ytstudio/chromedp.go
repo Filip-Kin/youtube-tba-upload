@@ -1185,12 +1185,16 @@ func (d *ChromedpDriver) Upload(ctx context.Context, p Profile, in UploadInput) 
 		d.logf("still-checking dialog: clicked Publish anyway")
 		diag.snap(bctx, "after-publish-anyway")
 	}
-	if !waitPublished(bctx, 90*time.Second) {
-		diag.snap(bctx, "not-published")
-		return UploadResult{VideoID: videoID, ChannelName: channelName},
-			fmt.Errorf("%w: Studio did not close the upload dialog after Save (%s)", ErrStillDraft, videoID)
+	// Studio confirms with a "Video published" share dialog, or, when the
+	// video is still processing, a "Video processing ... before your video is
+	// public" box. Neither showing is not proof of failure: the edit-page
+	// check below decides.
+	if waitPublished(bctx, 60*time.Second) {
+		d.logf("publish confirmed by Studio")
+	} else {
+		d.logf("no publish confirmation seen; the edit page decides")
+		diag.snap(bctx, "no-confirmation")
 	}
-	d.logf("upload dialog closed")
 
 	if videoID == "" {
 		_ = chromedp.Run(bctx,
@@ -2705,14 +2709,21 @@ func verifyNotDraft(ctx context.Context, videoID string) error {
 	return nil
 }
 
+// jsProcessingBox is true while Studio shows the box it raises after a publish
+// whose SD version is still processing ("Video processing ... before your
+// video is public on YouTube", with a Close button). Goonettes 2026-10-10.
+const jsProcessingBox = `(() => [...document.querySelectorAll('tp-yt-paper-dialog')].some(d =>
+	d.offsetParent !== null && /before your video is public/i.test(d.innerText || '')))()`
+
 func waitPublished(ctx context.Context, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		_ = chromedp.Run(ctx, chromedp.Sleep(time.Second))
-		var stillOpen, shared bool
+		var stillOpen, shared, processing bool
 		_ = chromedp.Run(ctx, chromedp.Evaluate(jsShadowExists("ytcp-button#done-button"), &stillOpen))
 		_ = chromedp.Run(ctx, chromedp.Evaluate(jsShadowExists("ytcp-video-share-dialog"), &shared))
-		if shared || !stillOpen {
+		_ = chromedp.Run(ctx, chromedp.Evaluate(jsProcessingBox, &processing))
+		if shared || processing || !stillOpen {
 			return true
 		}
 	}
