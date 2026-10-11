@@ -44,6 +44,15 @@ document.getElementById('done-button').addEventListener('click', () => {
   document.body.appendChild(w);
   w.querySelector('#anyway').addEventListener('click', () => {
     w.remove();
+    if (q.get('processing') === '1') {
+      // Studio 2026-10-10: the upload dialog stays, and a fixed-position
+      // "Video processing" box opens on top of it.
+      const b = document.createElement('tp-yt-paper-dialog');
+      b.style.cssText = 'position:fixed;top:200px;left:300px;width:400px;height:200px;display:block;background:#333';
+      b.innerText = 'Video processing\nThe standard definition (SD) version of your video needs to finish processing before your video is public on YouTube\nClose';
+      document.body.appendChild(b);
+      return;
+    }
     setTimeout(() => document.getElementById('dlg').remove(), 500);
   });
   w.querySelector('#back').addEventListener('click', () => w.remove());
@@ -133,5 +142,33 @@ func TestWaitChecksDoneGivesUp(t *testing.T) {
 	}
 	if waitChecksDone(ctx, 3*time.Second, t.Logf) {
 		t.Fatal("claimed checks complete while still checking")
+	}
+}
+
+// The "Video processing" box is position:fixed, so offsetParent is null; the
+// v0.2.5 check required offsetParent and never saw it.
+func TestProcessingBoxCountsAsPublished(t *testing.T) {
+	ctx, srv := checksCtx(t)
+	if err := chromedp.Run(ctx, chromedp.Navigate(srv.URL+"/?up=500&chk=60000&processing=1")); err != nil {
+		t.Fatal(err)
+	}
+	_ = chromedp.Run(ctx, chromedp.Sleep(800*time.Millisecond))
+	if ok, _ := pierceClick(ctx, "ytcp-button#done-button"); !ok {
+		t.Fatal("click")
+	}
+	if answered, err := publishAnyway(ctx, 5*time.Second); err != nil || !answered {
+		t.Fatalf("publishAnyway = %v, %v", answered, err)
+	}
+	var old bool
+	_ = chromedp.Run(ctx, chromedp.Evaluate(`[...document.querySelectorAll('tp-yt-paper-dialog')].some(d => d.offsetParent !== null && /before your video is public/i.test(d.innerText || ''))`, &old))
+	if old {
+		t.Fatal("fake box should reproduce the v0.2.5 miss (offsetParent null)")
+	}
+	start := time.Now()
+	if !waitPublished(ctx, 10*time.Second) {
+		t.Fatal("processing box not recognised")
+	}
+	if el := time.Since(start); el > 4*time.Second {
+		t.Fatalf("took %s to recognise the box", el)
 	}
 }

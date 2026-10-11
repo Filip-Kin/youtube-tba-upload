@@ -2688,10 +2688,22 @@ var reDraftState = regexp.MustCompile(`(?i)this video is in a draft state`)
 // it as a draft: the check that would have caught every stuck video on
 // 2026-10-10 at the time instead of hours later.
 func verifyNotDraft(ctx context.Context, videoID string) error {
-	if err := chromedp.Run(ctx,
-		chromedp.Navigate("https://studio.youtube.com/video/"+videoID+"/edit"),
-	); err != nil {
-		return fmt.Errorf("open edit page: %w", err)
+	// Bounded: an edit page that never finished loading held Q47 at Goonettes
+	// 2026-10-10 for 25 minutes with no timeout. Tried twice; if Studio will not
+	// load it, the upload is reported unconfirmed rather than waited on forever.
+	var navErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		nctx, cancel := context.WithTimeout(ctx, 45*time.Second)
+		navErr = chromedp.Run(nctx,
+			chromedp.Navigate("https://studio.youtube.com/video/"+videoID+"/edit"),
+		)
+		cancel()
+		if navErr == nil {
+			break
+		}
+	}
+	if navErr != nil {
+		return fmt.Errorf("could not open the edit page to confirm the publish: %w", navErr)
 	}
 	for i := 0; i < 20; i++ {
 		_ = chromedp.Run(ctx, chromedp.Sleep(time.Second))
@@ -2712,8 +2724,15 @@ func verifyNotDraft(ctx context.Context, videoID string) error {
 // jsProcessingBox is true while Studio shows the box it raises after a publish
 // whose SD version is still processing ("Video processing ... before your
 // video is public on YouTube", with a Close button). Goonettes 2026-10-10.
-const jsProcessingBox = `(() => [...document.querySelectorAll('tp-yt-paper-dialog')].some(d =>
-	d.offsetParent !== null && /before your video is public/i.test(d.innerText || '')))()`
+//
+// Visibility is the element's on-screen box, not offsetParent: the dialog is
+// position:fixed, and a fixed element's offsetParent is always null, so the
+// first version of this check never matched (v0.2.5).
+const jsProcessingBox = `(() => [...document.querySelectorAll('tp-yt-paper-dialog')].some(d => {
+	const r = d.getBoundingClientRect(), s = getComputedStyle(d);
+	return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden' &&
+		/before your video is public/i.test(d.innerText || '');
+}))()`
 
 func waitPublished(ctx context.Context, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
