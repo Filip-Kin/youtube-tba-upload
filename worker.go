@@ -385,6 +385,13 @@ func (m *uploadManager) uploadOne() {
 	_ = m.store.update(func(s *eventState) {
 		v := s.Videos[target.filename]
 		v.Status = statusUploaded
+		// A new video needs its own TBA/TOA link. Without this a re-upload
+		// (Retry on an uploaded row) kept the first upload's "submitted" flag
+		// and never linked the new video (Goonettes 2026-10-10).
+		if v.YTVideoID != result.VideoID {
+			v.TBASubmitted, v.TBASubmitError = false, ""
+			v.TOASubmitted, v.TOASubmitError = false, ""
+		}
 		v.YTVideoID = result.VideoID
 		v.UploadedAt = time.Now().UTC().Format(time.RFC3339)
 		v.TitleUsed = target.title
