@@ -948,7 +948,7 @@ const jsScrapePlaylists = `
 // file via setInputFiles on the hidden <input type=file>, fill title and
 // description, optionally set thumbnail, wait for "Checks complete", set
 // visibility, extract the 11-char ID, Save, optionally add to playlist.
-func (d *ChromedpDriver) Upload(ctx context.Context, p Profile, in UploadInput) (UploadResult, error) {
+func (d *ChromedpDriver) Upload(ctx context.Context, p Profile, in UploadInput) (res UploadResult, err error) {
 	ctx, cancelTO := context.WithTimeout(ctx, DefaultUploadDeadline)
 	defer cancelTO()
 
@@ -957,6 +957,17 @@ func (d *ChromedpDriver) Upload(ctx context.Context, p Profile, in UploadInput) 
 		return UploadResult{}, err
 	}
 	defer closeTab()
+	diag := d.startDiag(in.Title)
+	defer diag.close()
+	defer func() {
+		if err != nil {
+			diag.note("error: %v", err)
+			diag.snap(bctx, "error")
+		} else {
+			diag.note("result: %+v", res)
+		}
+	}()
+	diag.note("upload %q visibility=%q playlist=%q file=%s", in.Title, in.Visibility, in.PlaylistName, in.VideoPath)
 
 	visibility := strings.ToUpper(strings.TrimSpace(in.Visibility))
 	if visibility == "" {
@@ -1013,6 +1024,7 @@ func (d *ChromedpDriver) Upload(ctx context.Context, p Profile, in UploadInput) 
 	_ = chromedp.Run(bctx, chromedp.Evaluate(jsReadChannelName, &channelName))
 	channelName = strings.TrimSpace(channelName)
 	d.logf("step 1: channel=%q", channelName)
+	diag.snap(bctx, "studio")
 
 	// Step 2: open the Create dropdown, click "Upload videos", and feed the
 	// file in via the CDP Page.fileChooserOpened interception API. The
@@ -1047,6 +1059,7 @@ func (d *ChromedpDriver) Upload(ctx context.Context, p Profile, in UploadInput) 
 		d.logf("step 3: details dialog not found; form controls seen: %s", form)
 		return UploadResult{}, errors.New("wait for details dialog: #title-textarea never appeared")
 	}
+	diag.snap(bctx, "details-open")
 	// Every control below lives in an OPEN shadow root, so it is driven with the
 	// pierced locate + real mouse gesture helpers; document.querySelector clicks
 	// and text sets do not cross the shadow boundary.
@@ -1101,6 +1114,7 @@ func (d *ChromedpDriver) Upload(ctx context.Context, p Profile, in UploadInput) 
 			playlistSet = true
 			d.logf("playlist %q set in the upload dialog", in.PlaylistName)
 		}
+		diag.snap(bctx, "playlist")
 	}
 
 	// Step 6: advance DETAILS -> VIDEO_ELEMENTS -> CHECKS -> REVIEW by clicking
@@ -1116,6 +1130,7 @@ func (d *ChromedpDriver) Upload(ctx context.Context, p Profile, in UploadInput) 
 			d.logf("description check before review: %v", err)
 		}
 	}
+	diag.snap(bctx, "details-filled")
 	d.logf("step 6: advancing to review")
 	reachedReview := false
 	advanceDeadline := time.Now().Add(90 * time.Second)
@@ -1145,18 +1160,42 @@ func (d *ChromedpDriver) Upload(ctx context.Context, p Profile, in UploadInput) 
 	// Step 7: capture the 11-char video ID before saving.
 	_ = chromedp.Run(bctx, chromedp.Evaluate(jsExtractVideoID, &videoID))
 	d.logf("captured video id (pre-save): %q", videoID)
+	diag.snap(bctx, "review")
 
-	// Step 8: publish (Done), then wait for Studio to confirm it. A fixed 3 s
-	// let the session close before Studio had sent the save on a slow machine:
-	// at DCC 2026-10-10 every video stayed a Draft (Unlisted chosen, never saved).
+	// Step 7b: let the file finish uploading, then let Studio's checks finish.
+	// Saving earlier is what left every Goonettes and DCC 2026-10-10 video a
+	// Draft: Studio answers an early Save with a "We're still checking your
+	// content" dialog (Publish anyway / Go back) and saves nothing until it is
+	// answered. Closing the tab mid-transfer also cuts the upload off.
+	if err := waitTransferred(bctx, d.logf); err != nil {
+		return UploadResult{}, err
+	}
+	diag.snap(bctx, "transferred")
+	if waitChecksDone(bctx, DefaultChecksCompleteDeadline, d.logf) {
+		d.logf("checks complete")
+	} else {
+		d.logf("checks still running after %s; saving anyway", DefaultChecksCompleteDeadline)
+	}
+	diag.snap(bctx, "checks")
+
+	// Step 8: publish (Done/Save), answer the still-checking dialog if Studio
+	// raises it, then wait for the upload dialog to close.
 	if ok, err := pierceClick(bctx, "ytcp-button#done-button"); err != nil || !ok {
 		return UploadResult{}, fmt.Errorf("click done: ok=%v err=%v", ok, err)
 	}
-	if waitPublished(bctx, 90*time.Second) {
-		d.logf("publish confirmed by Studio")
-	} else {
-		d.logf("publish NOT confirmed by Studio within 90s; the video may still be a draft")
+	diag.snap(bctx, "after-done")
+	if answered, err := publishAnyway(bctx, 8*time.Second); err != nil {
+		d.logf("still-checking dialog: %v", err)
+	} else if answered {
+		d.logf("still-checking dialog: clicked Publish anyway")
+		diag.snap(bctx, "after-publish-anyway")
 	}
+	if !waitPublished(bctx, 90*time.Second) {
+		diag.snap(bctx, "not-published")
+		return UploadResult{VideoID: videoID, ChannelName: channelName},
+			fmt.Errorf("%w: Studio did not close the upload dialog after Save (%s)", ErrStillDraft, videoID)
+	}
+	d.logf("upload dialog closed")
 
 	if videoID == "" {
 		_ = chromedp.Run(bctx,
@@ -1169,6 +1208,13 @@ func (d *ChromedpDriver) Upload(ctx context.Context, p Profile, in UploadInput) 
 	if videoID == "" {
 		return UploadResult{ChannelName: channelName}, errors.New("could not extract video id from YT Studio")
 	}
+
+	// Check Studio's own page: the dialog closing is not proof of a publish.
+	if err := verifyNotDraft(bctx, videoID); err != nil {
+		diag.snap(bctx, "draft-check")
+		return UploadResult{VideoID: videoID, ChannelName: channelName}, fmt.Errorf("%w: %v", ErrStillDraft, err)
+	}
+	diag.snap(bctx, "published")
 
 	// Step 9: if the playlist could not be set in the dialog, try again on the
 	// video's edit page now that there is an ID to open.
@@ -2552,6 +2598,118 @@ func truncate(s string, n int) string {
 // waitPublished waits for Studio to confirm the Save: the upload dialog's
 // Save/Done button goes away (dialog closed, or replaced by the "Video
 // published" dialog). False when it is still there at the deadline.
+// jsUploadsDialogText is the visible text of the upload dialog, "" when it is
+// closed. Its footer carries the progress line ("Uploading 36% ... 50 seconds
+// left", "Checking 0% ... 5 minutes left", "Checks complete. No issues found.").
+const jsUploadsDialogText = `(() => {
+	const d = document.querySelector('ytcp-uploads-dialog');
+	return d && d.offsetParent !== null ? d.innerText : '';
+})()`
+
+var (
+	reUploading    = regexp.MustCompile(`(?i)uploading\s+\d+\s*%|uploading video`)
+	reUploadFailed = regexp.MustCompile(`(?i)upload failed|processing abandoned|upload (was )?cancel`)
+	reProgressLine = regexp.MustCompile(`(?i)(uploading|checking|processing|upload complete|checks complete)[^\n]*`)
+	reChecksDone   = regexp.MustCompile(`(?i)checks complete|no issues found`)
+)
+
+// waitTransferred polls the upload dialog until the file is no longer
+// uploading. Bounded by ctx (the whole upload's deadline).
+func waitTransferred(ctx context.Context, logf func(string, ...any)) error {
+	last := time.Time{}
+	for {
+		var t string
+		_ = chromedp.Run(ctx, chromedp.Evaluate(jsUploadsDialogText, &t))
+		if reUploadFailed.MatchString(t) {
+			return fmt.Errorf("Studio reports the upload failed: %q", reProgressLine.FindString(t))
+		}
+		if t != "" && !reUploading.MatchString(t) {
+			logf("transfer finished: %q", reProgressLine.FindString(t))
+			return nil
+		}
+		if time.Since(last) > 30*time.Second {
+			logf("waiting for transfer: %q", reProgressLine.FindString(t))
+			last = time.Now()
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("upload did not finish transferring: %w", ctx.Err())
+		case <-time.After(2 * time.Second):
+		}
+	}
+}
+
+// waitChecksDone polls the upload dialog for Studio's "Checks complete" line.
+func waitChecksDone(ctx context.Context, timeout time.Duration, logf func(string, ...any)) bool {
+	deadline := time.Now().Add(timeout)
+	last := time.Time{}
+	for time.Now().Before(deadline) {
+		var t string
+		_ = chromedp.Run(ctx, chromedp.Evaluate(jsUploadsDialogText, &t))
+		if reChecksDone.MatchString(t) {
+			return true
+		}
+		if time.Since(last) > 60*time.Second {
+			logf("waiting for checks: %q", reProgressLine.FindString(t))
+			last = time.Now()
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(3 * time.Second):
+		}
+	}
+	return false
+}
+
+var rePublishAnyway = regexp.MustCompile(`(?i)^\s*publish anyway\s*$`)
+
+// publishAnyway answers Studio's "We're still checking your content" dialog,
+// which an early Save raises and which holds the save until it is answered.
+// Reports whether the dialog appeared within wait.
+func publishAnyway(ctx context.Context, wait time.Duration) (bool, error) {
+	deadline := time.Now().Add(wait)
+	for time.Now().Before(deadline) {
+		var x, y float64
+		var info string
+		if err := chromedp.Run(ctx, shadowLocateByText([]string{"ytcp-button", "button"}, rePublishAnyway, &x, &y, &info)); err != nil {
+			return false, err
+		}
+		if info != "" {
+			return true, chromedp.Run(ctx, humanClick(x, y), chromedp.Sleep(1500*time.Millisecond))
+		}
+		_ = chromedp.Run(ctx, chromedp.Sleep(time.Second))
+	}
+	return false, nil
+}
+
+var reDraftState = regexp.MustCompile(`(?i)this video is in a draft state`)
+
+// verifyNotDraft opens the video's edit page and fails when Studio still shows
+// it as a draft: the check that would have caught every stuck video on
+// 2026-10-10 at the time instead of hours later.
+func verifyNotDraft(ctx context.Context, videoID string) error {
+	if err := chromedp.Run(ctx,
+		chromedp.Navigate("https://studio.youtube.com/video/"+videoID+"/edit"),
+	); err != nil {
+		return fmt.Errorf("open edit page: %w", err)
+	}
+	for i := 0; i < 20; i++ {
+		_ = chromedp.Run(ctx, chromedp.Sleep(time.Second))
+		var found bool
+		_ = chromedp.Run(ctx, chromedp.Evaluate(jsShadowExists("#title-textarea"), &found))
+		if found {
+			break
+		}
+	}
+	var body string
+	_ = chromedp.Run(ctx, chromedp.Sleep(1500*time.Millisecond), chromedp.Evaluate(`document.body.innerText`, &body))
+	if reDraftState.MatchString(body) {
+		return fmt.Errorf("Studio shows video %s as a draft after Save", videoID)
+	}
+	return nil
+}
+
 func waitPublished(ctx context.Context, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {

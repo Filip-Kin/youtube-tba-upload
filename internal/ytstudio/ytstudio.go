@@ -17,6 +17,11 @@ import (
 // a valid YouTube session and a re-authentication flow is required.
 var ErrSessionExpired = errors.New("ytstudio: session expired, sign-in required")
 
+// ErrStillDraft means the file reached YouTube but Studio never published it.
+// The result still carries the video ID. Not worth an automatic retry: that
+// uploads the file again and leaves the draft behind as a duplicate.
+var ErrStillDraft = errors.New("ytstudio: video is still a draft")
+
 // Profile identifies which browser profile a run should drive.
 //
 // Two modes:

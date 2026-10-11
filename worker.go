@@ -355,6 +355,14 @@ func (m *uploadManager) uploadOne() {
 				s.NeedsReauth = true
 				return
 			}
+			// The file is on YouTube as a draft. Keep its ID so it can be found
+			// and published, and do not retry: a retry uploads it again.
+			if errors.Is(err, ytstudio.ErrStillDraft) {
+				v.Status = statusFailed
+				v.NextAttempt = 0
+				v.YTVideoID = result.VideoID
+				return
+			}
 			if v.Attempts >= maxAttempts {
 				v.Status = statusFailed
 				v.NextAttempt = 0
