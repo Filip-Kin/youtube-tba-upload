@@ -1162,24 +1162,19 @@ func (d *ChromedpDriver) Upload(ctx context.Context, p Profile, in UploadInput) 
 	d.logf("captured video id (pre-save): %q", videoID)
 	diag.snap(bctx, "review")
 
-	// Step 7b: let the file finish uploading, then let Studio's checks finish.
-	// Saving earlier is what left every Goonettes and DCC 2026-10-10 video a
-	// Draft: Studio answers an early Save with a "We're still checking your
-	// content" dialog (Publish anyway / Go back) and saves nothing until it is
-	// answered. Closing the tab mid-transfer also cuts the upload off.
+	// Step 7b: let the file finish uploading. Closing the tab mid-transfer cuts
+	// the upload off. Studio's copyright checks are not waited for: they take
+	// 4-5 minutes per match video, and the "We're still checking your content"
+	// warning an early Save raises is aimed at people uploading by hand, so it is
+	// answered with Publish anyway below (Filip, 2026-10-10).
 	if err := waitTransferred(bctx, d.logf); err != nil {
 		return UploadResult{}, err
 	}
 	diag.snap(bctx, "transferred")
-	if waitChecksDone(bctx, DefaultChecksCompleteDeadline, d.logf) {
-		d.logf("checks complete")
-	} else {
-		d.logf("checks still running after %s; saving anyway", DefaultChecksCompleteDeadline)
-	}
-	diag.snap(bctx, "checks")
 
-	// Step 8: publish (Done/Save), answer the still-checking dialog if Studio
-	// raises it, then wait for the upload dialog to close.
+	// Step 8: publish (Done/Save), answer the still-checking dialog (Publish
+	// anyway), then wait for the upload dialog to close. Leaving that dialog
+	// unanswered is what left every Goonettes and DCC 2026-10-10 video a Draft.
 	if ok, err := pierceClick(bctx, "ytcp-button#done-button"); err != nil || !ok {
 		return UploadResult{}, fmt.Errorf("click done: ok=%v err=%v", ok, err)
 	}
