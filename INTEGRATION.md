@@ -107,22 +107,34 @@ Notes:
 Base `http://localhost:8807`. Permissive CORS; event-scoped routes take
 `?event_key=<tba_event_key>`.
 
-**Config** — `GET /api/upload/config?event_key=E` → the config object (§4).
-`POST` the same object to save (empty templates default; save triggers a rescan).
-This is where the tab writes `tba_auth_id`, `tba_secret`,
+**Config** — `GET /api/upload/config?event_key=E` → the config object (§4)
+without the credentials (see below). `POST` the full object to save (empty
+templates default; save triggers a rescan); a POST replaces the whole config, so
+send the credentials with every save.
+This is where the tab writes `tba_auth_id`, `tba_secret`, `toa_api_key`,
 `playlist_id`+`playlist_name`, templates, visibility,
-`thumbnail_path`, and browser profile fields. The template defaults the UI shows
-MUST equal the uploader defaults in `template.go` (`defaultTitleTemplate`,
-`defaultDescriptionTemplate`) — supported placeholders are `{video_prefix}`,
+`thumbnail_path`, and browser profile fields. The host app owns the title and
+description templates: it pushes them here when the uploader starts, when it
+switches event, and on every save. The defaults in `template.go`
+(`defaultTitleTemplate`, `defaultDescriptionTemplate`) only apply until that
+first push, or when the uploader runs on its own. Supported placeholders are `{video_prefix}`,
 `{event_name}`, `{event_year}`, `{match_level}`, `{match_number}`,
 `{match_label}`, `{play}`, `{play_suffix}`, `{title}`, and
 `{red[i].number}`/`{red[i].name}` / `{blue[i].number}`/`{blue[i].name}`.
+A team slot that is not there (FTC alliances have two teams) or has team number
+0 drops its line, so one template serves FRC and FTC.
+
+**Credentials are write-only.** `tba_auth_id`, `tba_secret` and `toa_api_key`
+are never served by a read route (`/api/upload/config`, `/api/upload/state`, the
+config echoed by a POST, `/api/events`). Reads carry `tba_credentials_set` and
+`toa_api_key_set` instead.
 
 Practice and test matches are **never uploaded** — the uploader hard-excludes
 those levels (`includeLevel`), so there are no include-practice/test flags.
 
 **State** — `GET /api/upload/state?event_key=E` → `{config, videos, manual_video_ids,
-needs_reauth, last_channel_name}`. `videos` is keyed by filename with the fields
+needs_reauth, last_channel_name, event_playlist_name}`, `config` without the
+credentials. `videos` is keyed by filename with the fields
 in §4. Poll ~5 s to render the table.
 
 **Control** — `POST /api/upload/scan|retry|skip?event_key=E`
@@ -266,7 +278,9 @@ Follow FIM-AV Assistant's existing idioms (verified against branch
 
 ## 4. Data shapes
 
-`eventConfig` (`upload_config.config_json`, and `/api/upload/config`):
+`eventConfig` (`upload_config.config_json`, and the body of `POST /api/upload/config`;
+reads leave out the three credential fields and add `tba_credentials_set` /
+`toa_api_key_set`):
 
 ```jsonc
 {

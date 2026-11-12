@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -298,3 +299,39 @@ func TestUploadEventShape(t *testing.T) {
 type errString string
 
 func (e errString) Error() string { return string(e) }
+
+// The read routes never serve the TBA or TOA credentials, only whether each
+// is set. POST /api/upload/config still stores them for the worker.
+func TestUploadReadRoutesOmitCredentials(t *testing.T) {
+	isolate(t)
+	srv := newTestServer(t)
+	body := `{"tba_auth_id":"AUTHID-x","tba_secret":"SECRET-x","toa_api_key":"TOAKEY-x","title_template":"T"}`
+	rsp, err := http.Post(srv.URL+"/api/upload/config?event_key=2026test", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved, _ := io.ReadAll(rsp.Body)
+	rsp.Body.Close()
+	for _, path := range []string{"/api/upload/config", "/api/upload/state"} {
+		rsp, err := http.Get(srv.URL + path + "?event_key=2026test")
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := io.ReadAll(rsp.Body)
+		rsp.Body.Close()
+		for _, out := range [][]byte{b, saved} {
+			for _, secret := range []string{"AUTHID-x", "SECRET-x", "TOAKEY-x"} {
+				if bytes.Contains(out, []byte(secret)) {
+					t.Errorf("%s leaks %s: %s", path, secret, out)
+				}
+			}
+		}
+		if !bytes.Contains(b, []byte(`"tba_credentials_set": true`)) || !bytes.Contains(b, []byte(`"toa_api_key_set": true`)) {
+			t.Errorf("%s: set flags missing: %s", path, b)
+		}
+	}
+	cfg := managers["2026test"].store.snapshot().Config
+	if cfg.TBASecret != "SECRET-x" || cfg.TBAAuthID != "AUTHID-x" || cfg.TOAAPIKey != "TOAKEY-x" {
+		t.Errorf("credentials not stored: %+v", cfg)
+	}
+}

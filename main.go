@@ -616,7 +616,7 @@ func apiUploadGetConfig(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, m.store.snapshot().Config)
+	writeJSON(w, publicConfig(m.store.snapshot().Config))
 }
 
 func apiUploadSaveConfig(w http.ResponseWriter, r *http.Request) {
@@ -649,7 +649,7 @@ func apiUploadSaveConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	// Switching video_dir should trigger an immediate scan so the UI updates.
 	go m.scanNow()
-	writeJSON(w, cfg)
+	writeJSON(w, publicConfig(cfg))
 }
 
 func apiUploadThumbnail(w http.ResponseWriter, r *http.Request) {
@@ -710,9 +710,35 @@ func apiUploadGetState(w http.ResponseWriter, r *http.Request) {
 	}
 	st := m.store.snapshot()
 	writeJSON(w, struct {
-		eventState
-		EventPlaylistName string `json:"event_playlist_name"`
-	}{st, eventPlaylistName(st)})
+		Config            servedConfig           `json:"config"`
+		Videos            map[string]*videoEntry `json:"videos"`
+		ManualVideoIDs    map[string]string      `json:"manual_video_ids"`
+		NeedsReauth       bool                   `json:"needs_reauth"`
+		LastChannelName   string                 `json:"last_channel_name,omitempty"`
+		EventPlaylistName string                 `json:"event_playlist_name"`
+	}{publicConfig(st.Config), st.Videos, st.ManualVideoIDs, st.NeedsReauth, st.LastChannelName, eventPlaylistName(st)})
+}
+
+// servedConfig is an eventConfig as the read routes serve it. The TBA and TOA
+// credentials are write-only: POST /api/upload/config sets them, and reads only
+// say whether each is set. The routes allow any origin, so a page open in a
+// browser on this machine could otherwise read them.
+type servedConfig struct {
+	eventConfig
+	TBACredentialsSet bool `json:"tba_credentials_set"`
+	TOAAPIKeySet      bool `json:"toa_api_key_set"`
+}
+
+func publicConfig(c eventConfig) servedConfig {
+	out := servedConfig{
+		TBACredentialsSet: c.TBAAuthID != "" && c.TBASecret != "",
+		TOAAPIKeySet:      c.TOAAPIKey != "",
+	}
+	c.TBAAuthID = ""
+	c.TBASecret = ""
+	c.TOAAPIKey = ""
+	out.eventConfig = c
+	return out
 }
 
 func apiUploadScan(w http.ResponseWriter, r *http.Request) {

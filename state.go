@@ -56,18 +56,16 @@ type eventConfig struct {
 	// TBAAuthID / TBASecret are the event's trusted-API credentials. With both
 	// set, each finished upload's YouTube URL is posted to its match on The
 	// Blue Alliance (trusted match_videos/add); without them nothing is sent.
-	// TBAAuthID / TBASecret are the event's trusted-API credentials. The root
-	// TBA-uploader binary takes these per-request from the web UI; the uploader
-	// holds them in config so it can submit without that binary running. They
-	// live only in state.json under the OS data dir, never in the repo.
+	// They are write-only over HTTP: the read routes serve publicConfig, which
+	// leaves them out.
 	TBAAuthID string `json:"tba_auth_id,omitempty"`
 	TBASecret string `json:"tba_secret,omitempty"`
 	// At an FTC event (-program ftc), with TOAAPIKey + TOAEventKey set, each
 	// finished upload's URL is set on its match on The Orange Alliance.
 	// TOAAPIKey is a TOA API key with write access (level 3 "Event Write" or
 	// 4); a myTOA account key is level 1 and is refused. TOAEventKey is the TOA
-	// event key the match keys are built on, e.g. "2627-FIM-TEST". Stored like
-	// the TBA credentials, and like them not redacted from the API.
+	// event key the match keys are built on, e.g. "2627-FIM-TEST". The API key
+	// is write-only over HTTP, like the TBA credentials.
 	TOAAPIKey   string `json:"toa_api_key,omitempty"`
 	TOAEventKey string `json:"toa_event_key,omitempty"`
 }
