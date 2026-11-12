@@ -55,11 +55,15 @@ func (c *templateContext) resolvePlaceholder(name string) (string, bool) {
 			return "", false
 		}
 		t := teams[idx]
+		// A slot with no team number is an empty station, not a team: it
+		// resolves like a slot that is not there, so its line drops. FTC
+		// alliances have two teams, so a template's red[2]/blue[2] lines drop
+		// there and the same template serves FRC and FTC.
+		if t.Number == 0 {
+			return "", false
+		}
 		switch field {
 		case "number":
-			if t.Number == 0 {
-				return "", true // defined but empty
-			}
 			return strconv.Itoa(t.Number), true
 		case "name":
 			return t.Name, true // empty name is defined-as-empty

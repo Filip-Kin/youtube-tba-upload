@@ -127,3 +127,30 @@ func TestEmptyNameRendersAsEmpty(t *testing.T) {
 		t.Errorf("got %q want %q", got, "- 1234")
 	}
 }
+
+func TestTwoTeamAlliancesDropThirdSlot(t *testing.T) {
+	// FTC: two teams per alliance. The default template's third-team lines
+	// drop, and so does a slot whose team number is 0.
+	ctx := &templateContext{
+		Title: "Q1",
+		Alliances: map[string][]allianceTeam{
+			"red":  {{Number: 1001, Name: "A"}, {Number: 1002, Name: "B"}},
+			"blue": {{Number: 2001, Name: "C"}, {Number: 2002, Name: "D"}, {Number: 0}},
+		},
+	}
+	got := renderDescription(defaultDescriptionTemplate, ctx)
+	want := "Q1\n\nRed Alliance:\n- 1001 A\n- 1002 B\n\nBlue Alliance:\n- 2001 C\n- 2002 D"
+	if got != want {
+		t.Errorf("got %q\nwant %q", got, want)
+	}
+}
+
+func TestEmptyStationOnlyDropsBlock(t *testing.T) {
+	tmpl := "Red Alliance:\n- {red[0].number} {red[0].name}"
+	ctx := &templateContext{
+		Alliances: map[string][]allianceTeam{"red": {{Number: 0}}},
+	}
+	if got := renderDescription(tmpl, ctx); got != "" {
+		t.Errorf("got %q want empty", got)
+	}
+}
