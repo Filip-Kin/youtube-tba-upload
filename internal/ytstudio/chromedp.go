@@ -337,8 +337,16 @@ func (d *ChromedpDriver) tab(ctx context.Context, p Profile) (_ context.Context,
 		// Open order. Default (headed) profiles open headed first and fall back
 		// to headless on a machine with no display. A headless-preference profile
 		// (uploads, channel checks) opens headless first — the UA spoof in
-		// allocate keeps YT Studio from bouncing it — and only falls back to a
-		// headed window if headless will not start at all.
+		// allocate keeps YT Studio from bouncing it.
+		//
+		// It never falls back to a headed window: these are background
+		// operations (a boot-time sign-in check, an automated upload) that no
+		// one is watching for, and CheckChannel's whole contract is that it
+		// never pops a window. A headless start failing for some other reason
+		// (a bad managed-browser build, a missing codec, antivirus blocking the
+		// flag) must surface as an error, not a visible, focus-stealing Chrome
+		// window the operator never asked for (seen live on FIMVIDEO3,
+		// 2026-11-14: every AVA launch, not signed in, nobody uploading).
 		order := []bool{false, true}
 		if session.Headless {
 			order = []bool{true, false}
@@ -363,10 +371,11 @@ func (d *ChromedpDriver) tab(ctx context.Context, p Profile) (_ context.Context,
 			}
 			cancelBrowser()
 			cancelAlloc()
-			// Fall back to the next mode if there is one: headed→headless when
-			// the machine has no display, headless→headed when headless will not
-			// start. Otherwise surface the error.
-			if i+1 < len(order) && (headless || isNoDisplayErr(err)) {
+			// Fall back to the next mode only when the machine genuinely has no
+			// display (headed→headless). A headless attempt that fails for any
+			// other reason surfaces the error instead of opening a headed window
+			// — see the comment above the order slice.
+			if i+1 < len(order) && isNoDisplayErr(err) {
 				d.logf("browser did not start (headless=%v: %v); trying %v", headless, err, order[i+1])
 				continue
 			}
